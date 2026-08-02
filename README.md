@@ -18,7 +18,7 @@ file, a stream arriving over a socket, or raw telephony audio with no header
 at all. Pure Rust, and the same bytes give you the same samples on every
 platform.
 
-<a href="https://crates.io/crates/decibri-decode"><img src="https://img.shields.io/crates/v/decibri-decode.svg" alt="Crates.io"></a>&nbsp;
+<a href="https://crates.io/crates/decibri-decode"><img src="https://img.shields.io/crates/v/decibri-decode.svg" alt="Crates.io"></a>&nbsp;&nbsp;
 <a href="https://github.com/decibri/decibri-decode/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License"></a>
 
 ## What you can do with it
