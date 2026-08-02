@@ -202,7 +202,7 @@ jobs:
         with:
           shared-key: "rust"
       - run: cargo generate-lockfile
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: cargo-audit
       - run: cargo audit
