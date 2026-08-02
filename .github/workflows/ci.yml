@@ -1,0 +1,208 @@
+name: CI
+
+# Modelled on decibri-resampler's ci.yml, the closest single-crate sibling.
+# Two deliberate divergences from decibri's own CI. Do not "fix" them:
+#
+#   1. Clippy runs with --all-targets. decibri's lint job omits it, which is
+#      how a clippy::manual_range_contains reached shipping source and went
+#      unnoticed by two subsequent gate reports claiming clippy clean. Tests
+#      and examples ship in the published tarball, so they are published
+#      source and are linted like it.
+#   2. Doc builds run under RUSTDOCFLAGS=-D warnings, so a broken intra-doc
+#      link fails the build instead of scrolling past in a log.
+#
+# There is deliberately NO publish job. Publishing is manual and Ross does it;
+# the `package` job below proves the crate would package cleanly, nothing more.
+
+on:
+  push:
+    # The siblings build [main, development]; master is listed because the
+    # pre-publish local tree is on master, and a branch the trigger does not
+    # name gets no CI at all.
+    branches: [main, master, development]
+  pull_request:
+    branches: [main, master, development]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
+      # Divergence 1 (see the header comment): --all-targets, always.
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo fmt --all -- --check
+      # The encoding of the source itself, byte by byte. A PowerShell text
+      # substitution once re-encoded src/flac.rs and prepended a byte-order
+      # mark, and the crate built, formatted, linted and passed 262 tests with
+      # the corruption in place: rustc accepts a BOM and mangled UTF-8 inside
+      # a comment is still UTF-8. Named here rather than left inside the bulk
+      # `cargo test` run so a re-encode is reported as one.
+      #
+      # The rule is plain ASCII, not an allowlist of the characters the
+      # repository happens to use. An ASCII file has no multi-byte sequence to
+      # double-encode, so this is prevention rather than detection.
+      - name: Source encoding
+        run: cargo test --test source_encoding -- --nocapture
+
+  determinism:
+    # The most important job in this file. The crate's headline claim is
+    # bit-exact cross-platform byte-identical decoding, and every step of its
+    # construction pinned witness hashes over the decoded output of every
+    # carried format (FNV-1a over the output bit patterns):
+    #
+    #   PCM    0x57ac_66d6_2a28_b665   (src/pcm.rs)
+    #   G.711  (src/g711.rs)
+    #   WAV    0x51fe_2597_ebf5_2432   (tests/wav_conformance.rs)
+    #   AIFF   0x428d_f9aa_ce0c_4172   (tests/aiff_conformance.rs)
+    #   FLAC   0x97ef_b751_3ce8_8469   (tests/flac_conformance.rs)
+    #   bare   0xb927_8d5a_d076_c4e3   (tests/flac_headerless.rs)
+    #   probe  0x5ded_2068_3c43_3e99   (tests/probe.rs)
+    #   probe  0xad35_8612_e054_4fa5   (tests/probe.rs, the FLAC route)
+    #
+    # `bare` covers the bare frame, out-of-band streaminfo and recovery paths,
+    # which have their own decode entry points and so their own witness. The
+    # two probe witnesses cover the content-dispatching entry points, whole
+    # file and streaming; they are split so the PCM containers and FLAC move
+    # independently of each other.
+    #
+    # The witness values are pinned constants in the tests, so every cell of
+    # this matrix asserts the same bits: three operating systems, two CPU
+    # architectures (x86-64 and aarch64) and two toolchains all agreeing is
+    # the claim expressed as a gate. No tolerance is relaxed on any cell.
+    # Release-profile runs are included because a determinism break that only
+    # appears under release codegen (FMA contraction, vectorised
+    # reassociation) would otherwise pass every debug cell and ship.
+    name: Determinism (${{ matrix.os }}, ${{ matrix.toolchain }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest, ubuntu-24.04-arm]
+        toolchain: [stable, "1.88"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      # @master with a toolchain input is the action's documented form for a
+      # matrixed toolchain; the direct @stable / @1.88 tag form cannot take an
+      # expression.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-${{ matrix.toolchain }}"
+      - run: cargo build --all-targets
+      # The pinned witnesses first and by name, so a determinism break is
+      # reported as one rather than as a generic test failure.
+      - name: Pinned determinism witnesses
+        run: cargo test bit_identical_to_a_pinned_witness
+      # The full suite: unit, integration (which drives both examples as real
+      # processes), and doctests.
+      - run: cargo test
+      - name: Witnesses under release codegen
+        run: cargo test --release bit_identical_to_a_pinned_witness
+      - run: cargo test --release
+
+  test-32bit:
+    # usize is 32 bits here, so the u32 chunk-size arithmetic that this crate
+    # does checked and in 64 bits, and that wraps in the parser this crate
+    # replaces, is only observable in this cell. The conformance suites
+    # include inputs whose sizes are chosen to wrap 32-bit arithmetic. The
+    # i686 binaries run natively on the x86-64 host; gcc-multilib provides the
+    # 32-bit link support. The i686-unknown-linux-gnu std ships with stable
+    # rustup toolchains; if a future toolchain drops it, note the gap here
+    # rather than deleting the job.
+    name: Test (i686, 32-bit)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-i686"
+      # Plain `cargo test`, NOT --all-targets, deliberately: tests/examples.rs
+      # runs the example binaries as real processes, and plain `cargo test`
+      # builds them as plain binaries, whereas --all-targets rebuilds them as
+      # 0-test harness binaries and never produces the runnable form. Plain
+      # `cargo test` also includes the doctests --all-targets excludes.
+      - run: cargo test --target i686-unknown-linux-gnu
+
+  msrv:
+    # Pinned to 1.88, the declared rust-version, which matches decibri's
+    # workspace MSRV: this crate is consumed by decibri, so it may not raise
+    # the floor decibri holds. The floor was verified by running the full
+    # suite on the 1.88.0 toolchain locally before this job existed; the job
+    # keeps it verified rather than merely declared.
+    name: MSRV (1.88)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-1.88"
+      - run: cargo build --all-targets
+      # Plain `cargo test` for the same reason as the i686 job: the
+      # examples-as-processes test needs the plain example binaries.
+      - run: cargo test
+
+  docs:
+    name: Docs
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      # Divergence 2 (see the header comment): a rustdoc warning is a failure.
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
+      - run: cargo doc --no-deps
+
+  package:
+    # Proves the crate would package and build from its own tarball. This is
+    # the whole publish story in CI: the actual `cargo publish` is manual.
+    name: Package (dry run)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
+      - run: cargo publish --dry-run
+      - run: cargo package --list
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
+      - run: cargo generate-lockfile
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

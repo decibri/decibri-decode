@@ -1,0 +1,39 @@
+[package]
+name = "decibri-decode"
+version = "0.1.0"
+edition = "2021"
+# Matches the decibri workspace MSRV (workspace.package.rust-version in
+# decibri's root Cargo.toml). decibri-decode is consumed by decibri, so it may
+# not raise the floor decibri holds.
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Encoded audio in, mono f32 at a declared sample rate out."
+# Follows the sibling convention (github.com/decibri/<crate>); the resampler
+# is published under it. As of 2026-08-01 this exact URL is not yet live, so
+# create the repository (or correct this) before `cargo publish`, because
+# crates.io renders it publicly.
+repository = "https://github.com/decibri/decibri-decode"
+documentation = "https://docs.rs/decibri-decode"
+readme = "README.md"
+keywords = ["audio", "decode", "decoder", "codec", "pcm"]
+categories = ["multimedia::audio"]
+# CI configuration and agent conventions are repository tooling, not crate
+# content; the consumable documentation (README, the examples, the tests) all
+# ships. CLAUDE.local.md is untracked and gitignored, so `cargo package` skips
+# it regardless; it is listed for intent.
+exclude = [".github/", "CLAUDE.md", "CLAUDE.local.md"]
+
+# No `[features]` section, deliberately. Give this crate bytes and it works
+# out what to do with them; a feature flag would mean identical bytes behaving
+# differently depending on how the crate was built. Adding a feature later is
+# not a breaking change and removing one is, so the cheap position is none.
+
+[dependencies]
+# The only dependency this crate has, and the only one it will ever have for
+# rate conversion. decibri pins `decibri-resampler = "0.4"` in
+# crates/decibri/Cargo.toml; this requirement is identical so cargo unifies the
+# two into a single tree entry rather than linking two resampler
+# implementations into one binary. Sourced from crates.io, never by path: that
+# keeps cargo out of the resampler's working tree and keeps the version
+# requirement pinned to what decibri actually ships against.
+decibri-resampler = "0.4"
