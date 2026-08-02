@@ -1,11 +1,21 @@
 version: 2
 updates:
-  - package-ecosystem: "cargo"
+  - package-ecosystem: cargo
     directory: "/"
     schedule:
-      interval: "weekly"
-
-  - package-ecosystem: "github-actions"
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # Tagged by the Rust toolchain it installs, not by an action version.
+      # The pin is the MSRV and bumping it would silently disable the MSRV job.
+      - dependency-name: "dtolnay/rust-toolchain"
+      # Releases most days. The floating v2 tag is the intended usage.
+      - dependency-name: "taiki-e/install-action"
+        update-types:
+          - "version-update:semver-patch"
+          - "version-update:semver-minor"
