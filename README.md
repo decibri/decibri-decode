@@ -1,3 +1,14 @@
+<!-- markdownlint-disable MD033 MD041 -->
+
+<p align="center">
+  <a href="https://decibri.com">
+    <img
+      src="https://github.com/user-attachments/assets/6584c5b5-007d-4f6a-8d9c-60ac7cbd97b3"
+      alt="Decibri Decode"
+      width="100%">
+  </a>
+</p>
+
 # decibri-decode
 
 Turn audio into the format you need to work with.
@@ -6,6 +17,9 @@ Get back mono `f32` at the sample rate you need from any WAV, AIFF or FLAC
 file, a stream arriving over a socket, or raw telephony audio with no header
 at all. Pure Rust, and the same bytes give you the same samples on every
 platform.
+
+<a href="https://crates.io/crates/decibri-decode"><img src="https://img.shields.io/crates/v/decibri-decode.svg" alt="Crates.io"></a>&nbsp;
+<a href="https://github.com/decibri/decibri-decode/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License"></a>
 
 ## What you can do with it
 
