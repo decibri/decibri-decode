@@ -150,9 +150,9 @@
 //! field where the encoding requires it. [`AiffCodec`] is the set of encodings
 //! this crate carries in the container: linear PCM at four widths (big-endian
 //! under `NONE`/`twos`, little-endian under `sowt`, and **signed** at 8 bits
-//! where WAV is unsigned), IEEE float under `fl32`/`fl64`, and both G.711 laws
-//! under `alaw`/`ulaw`. Every other compression type is
-//! [`DecodeError::UnsupportedCodec`].
+//! where WAV is unsigned), unsigned 8-bit under AIFF-C's `raw `, IEEE float
+//! under `fl32`/`fl64`, and both G.711 laws under `alaw`/`ulaw`. Every other
+//! compression type is [`DecodeError::UnsupportedCodec`].
 //!
 //! Dispatch is on the **form type and the compression four-CC** (paired with
 //! `sampleSize` for the linear widths), never on a file name. The 80-bit

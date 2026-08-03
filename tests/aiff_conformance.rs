@@ -268,8 +268,9 @@ fn assert_same_samples(actual: &[f32], expected: &[f32], label: &str) {
 type CodecRow = (&'static [u8; 4], Option<&'static [u8; 4]>, u16, AiffCodec);
 
 /// Every encoding row the matrix runs.
-const CODECS: [CodecRow; 13] = [
+const CODECS: [CodecRow; 14] = [
     (b"AIFF", None, 8, AiffCodec::PcmI8),
+    (b"AIFC", Some(b"raw "), 8, AiffCodec::PcmU8),
     (b"AIFF", None, 16, AiffCodec::PcmI16),
     (b"AIFF", None, 24, AiffCodec::PcmI24),
     (b"AIFF", None, 32, AiffCodec::PcmI32),
@@ -352,9 +353,11 @@ fn respell(bytes: &[u8], how: Respell) -> Vec<u8> {
 /// through any AIFF code.
 #[test]
 fn wav_and_aiff_carrying_the_same_audio_decode_bit_identically() {
-    let cases: [(WavCodec, &[u8; 4], u16, Respell); 12] = [
+    let cases: [(WavCodec, &[u8; 4], u16, Respell); 13] = [
         (WavCodec::PcmU8, b"NONE", 8, Respell::Xor80),
         (WavCodec::PcmU8, b"sowt", 8, Respell::Xor80),
+        // `raw ` is WAV's own unsigned convention, so the bytes do not move.
+        (WavCodec::PcmU8, b"raw ", 8, Respell::Same),
         (WavCodec::PcmI16, b"NONE", 16, Respell::Swap(2)),
         (WavCodec::PcmI16, b"twos", 16, Respell::Swap(2)),
         (WavCodec::PcmI16, b"sowt", 16, Respell::Same),
@@ -461,6 +464,191 @@ fn cross_check(wav_codec: WavCodec, compression: &[u8; 4], bits: u16, how: Respe
         &streamed,
         decoded_wav.samples(),
         &format!("{label} streamed"),
+    );
+}
+
+// -- `raw `: the one AIFF-C encoding whose eight-bit samples are unsigned ------
+
+/// A complete AIFF-C `raw ` file spelled out one byte at a time from the
+/// AIFF-C specification, with every field labelled.
+///
+/// The literal is the point. The builders above are an independent
+/// transcription of the format, but they are still a program, and a
+/// misunderstanding in `comm` would be shared by every fixture they produce.
+/// This array shares nothing with them: it is what the specification says a
+/// six-frame mono `raw ` file at 8000 Hz looks like, written out.
+const HAND_BUILT_RAW_FILE: [u8; 79] = [
+    // FORM header: the magic, the size of everything after it, the form type.
+    b'F', b'O', b'R', b'M', //
+    0x00, 0x00, 0x00, 0x47, // 71 bytes follow
+    b'A', b'I', b'F', b'C', //
+    // FVER: the one version timestamp AIFF-C has ever had.
+    b'F', b'V', b'E', b'R', //
+    0x00, 0x00, 0x00, 0x04, //
+    0xA2, 0x80, 0x51, 0x40, //
+    // COMM: 24 bytes of body.
+    b'C', b'O', b'M', b'M', //
+    0x00, 0x00, 0x00, 0x18, //
+    0x00, 0x01, // numChannels = 1
+    0x00, 0x00, 0x00, 0x06, // numSampleFrames = 6
+    0x00, 0x08, // sampleSize = 8
+    // sampleRate, 80-bit extended: exponent 0x400B is 16383 + 12, and the
+    // significand 0xFA00... is 8000 << 51, so the value is exactly 8000.
+    0x40, 0x0B, 0xFA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    b'r', b'a', b'w', b' ', // compressionType
+    0x00, 0x00, // a zero-length compressionName, and its pad
+    // SSND: 14 bytes of body, so a pad byte follows the chunk.
+    b'S', b'S', b'N', b'D', //
+    0x00, 0x00, 0x00, 0x0E, //
+    0x00, 0x00, 0x00, 0x00, // offset
+    0x00, 0x00, 0x00, 0x00, // blockSize
+    // The audio: offset binary, so 0x80 is silence and 0x00 is full negative.
+    0x80, 0xC0, 0x00, 0xFF, 0x40, 0x7F, //
+    0x00, // the pad byte for the odd SSND body
+];
+
+/// What [`HAND_BUILT_RAW_FILE`] holds, read off the offset-binary definition:
+/// subtract 128, divide by 128.
+const HAND_BUILT_RAW_SAMPLES: [f32; 6] = [
+    0.0,           // 0x80 is silence, not -1.0
+    0.5,           // 0xC0 is +64
+    -1.0,          // 0x00 is the most negative value, not silence
+    127.0 / 128.0, // 0xFF is the most positive
+    -0.5,          // 0x40 is -64
+    -1.0 / 128.0,  // 0x7F is -1
+];
+
+/// The byte oracle for `raw `: a file this crate had no part in building
+/// decodes to the samples the specification says it holds.
+///
+/// A reader that carried AIFF's signed convention into `raw ` decodes 0x80
+/// to -1.0 rather than 0.0 and every sample lands half full scale away, which
+/// is the failure this gate exists to catch and the one the round trip
+/// through this crate's own writer cannot see.
+#[test]
+fn a_hand_built_raw_file_decodes_to_the_samples_the_specification_states() {
+    let reader = AiffReader::new(&HAND_BUILT_RAW_FILE).expect("hand-built raw file");
+    assert_eq!(reader.format().form, AiffForm::Aifc);
+    assert_eq!(reader.format().compression, FourCc(*b"raw "));
+    assert_eq!(reader.format().codec, AiffCodec::PcmU8);
+    assert_eq!(reader.format().bits_per_sample, 8);
+    assert_eq!(reader.spec(), AudioSpec::mono(8_000));
+    assert_eq!(reader.frames(), 6);
+    assert_eq!(reader.data(), [0x80, 0xC0, 0x00, 0xFF, 0x40, 0x7F]);
+    assert_same_samples(
+        reader.decode_to_end().samples(),
+        &HAND_BUILT_RAW_SAMPLES,
+        "hand-built raw file",
+    );
+
+    // The streaming reader reaches the same audio from the same bytes.
+    let (spec, streamed) = stream_decode(&HAND_BUILT_RAW_FILE, 3, Drive::Greedy).expect("stream");
+    assert_eq!(spec, Some(AudioSpec::mono(8_000)));
+    assert_same_samples(&streamed, &HAND_BUILT_RAW_SAMPLES, "hand-built raw stream");
+
+    // The same payload under `NONE` is the signed reading of the same bytes,
+    // half full scale away from every value above. Both spellings are
+    // asserted, so a reader that resolved `raw ` to the signed format would
+    // make these two agree and fail here.
+    let as_signed = aiff_file(
+        b"AIFF",
+        1,
+        6,
+        8,
+        8_000,
+        None,
+        &[0x80, 0xC0, 0x00, 0xFF, 0x40, 0x7F],
+    );
+    let signed = AiffReader::new(&as_signed).expect("signed").decode_to_end();
+    let expected_signed: [f32; 6] = [-1.0, -0.5, 0.0, -1.0 / 128.0, 0.5, 127.0 / 128.0];
+    assert_same_samples(signed.samples(), &expected_signed, "the signed reading");
+}
+
+/// Every pascal-string spelling of a `raw ` `COMM`, since the compression
+/// field is the only place the encoding is named.
+#[test]
+fn raw_resolves_under_every_compression_name_spelling() {
+    let payload: [u8; 6] = [0x80, 0xC0, 0x00, 0xFF, 0x40, 0x7F];
+    for pstring in PSTRINGS {
+        let bytes = aiff_file(b"AIFC", 1, 6, 8, 8_000, Some((b"raw ", pstring)), &payload);
+        let reader = AiffReader::new(&bytes).unwrap_or_else(|e| panic!("{pstring:?}: {e}"));
+        assert_eq!(reader.format().codec, AiffCodec::PcmU8, "{pstring:?}");
+        assert_same_samples(
+            reader.decode_to_end().samples(),
+            &HAND_BUILT_RAW_SAMPLES,
+            &format!("{pstring:?}"),
+        );
+    }
+}
+
+/// `raw ` names one width. At any other `sampleSize` the file is a width
+/// rejection naming the four-CC and the width, never a silent accept at some
+/// other stride.
+#[test]
+fn raw_at_a_width_other_than_eight_is_rejected_on_the_width() {
+    let payload = payload_bytes(48, 0x5A17);
+    for bits in [1u16, 4, 12, 16, 20, 24, 32, 64] {
+        let bytes = aiff_file(
+            b"AIFC",
+            1,
+            6,
+            bits,
+            8_000,
+            Some((b"raw ", Pstring::Zero)),
+            &payload[..6 * (usize::from(bits).div_ceil(8))],
+        );
+        let error = AiffReader::new(&bytes).expect_err("must reject");
+        assert!(
+            matches!(
+                &error,
+                DecodeError::UnsupportedSampleFormat { format, bits_per_sample }
+                    if *bits_per_sample == bits && format.to_string().contains("raw")
+            ),
+            "raw at {bits} bits: unexpected error: {error}"
+        );
+    }
+}
+
+/// A plain `AIFF` form has no compression field, so the four bytes that would
+/// hold one in an `AIFF-C` file are not read as one.
+///
+/// This is what confines `raw ` to `AIFF-C`. A file declaring `FORM`/`AIFF`
+/// with `raw ` sitting where `AIFC` keeps its compressionType resolves as the
+/// form's implicit `NONE`, signed, and never as unsigned: a reader that
+/// consulted those bytes regardless of the form would accept an encoding the
+/// format cannot express there, and would decode the same file two different
+/// ways depending on a field its form does not have.
+#[test]
+fn raw_bytes_in_a_plain_aiff_form_are_not_a_compression_field() {
+    let payload: [u8; 6] = [0x80, 0xC0, 0x00, 0xFF, 0x40, 0x7F];
+    // A plain AIFF whose COMM body is the four fixed fields followed by the
+    // bytes `raw ` and a zero-length pascal string: the exact byte layout an
+    // AIFC COMM has, under the form that does not define it.
+    let mut body = comm(1, 6, 8, extended_rate(8_000), None);
+    body.extend_from_slice(b"raw ");
+    body.extend_from_slice(&[0, 0]);
+    let bytes = form(
+        b"AIFF",
+        &[chunk(b"COMM", &body), chunk(b"SSND", &ssnd(0, 0, &payload))],
+    );
+
+    let reader = AiffReader::new(&bytes).expect("a plain AIFF with a long COMM still reads");
+    assert_eq!(reader.format().form, AiffForm::Aiff);
+    assert_eq!(
+        reader.format().compression,
+        FourCc(*b"NONE"),
+        "a plain AIFF form reported a compression type it cannot carry"
+    );
+    assert_eq!(
+        reader.format().codec,
+        AiffCodec::PcmI8,
+        "`raw ` was honoured in a form that has no compression field"
+    );
+    let expected: [f32; 6] = [-1.0, -0.5, 0.0, -1.0 / 128.0, 0.5, 127.0 / 128.0];
+    assert_same_samples(
+        reader.decode_to_end().samples(),
+        &expected,
+        "plain AIFF with raw bytes in the COMM",
     );
 }
 
@@ -1502,7 +1690,7 @@ fn the_dimension_matrix() {
             }
         }
     }
-    assert_eq!(files, 13 * 3 * 4 * 8 * 4);
+    assert_eq!(files, 14 * 3 * 4 * 8 * 4);
 }
 
 // -- Gate 12: cross-platform determinism --------------------------------------
@@ -1551,7 +1739,10 @@ fn aiff_output_is_bit_identical_to_a_pinned_witness() {
             );
         }
     }
-    assert_eq!(fnv1a(witness), 0x428d_f9aa_ce0c_4172, "AIFF output changed");
+    // Re-pinned for 0.1.2, when the `raw ` row joined CODECS and so joined
+    // this sweep. The previous value, over the thirteen rows this witness
+    // covered in 0.1.1, was 0x428d_f9aa_ce0c_4172.
+    assert_eq!(fnv1a(witness), 0x34d1_5ab8_d25f_1822, "AIFF output changed");
 }
 
 // -- Structural odds and ends the dimensions imply ----------------------------

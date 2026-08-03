@@ -1203,6 +1203,21 @@ fn riff_size(fmt_bytes: u64, data_bytes: u64, ds64: bool) -> Option<u64> {
 /// no variant that is readable and not writable, with the pad
 /// byte on an odd-length `data` chunk and a correct `RIFF` size field.
 ///
+/// # Samples outside full scale, and samples that are not finite
+///
+/// **The integer encodings clamp and the float encodings do not.** A sample
+/// outside `-1.0..=1.0` written to an integer encoding becomes the extreme
+/// value rather than wrapping, an infinity becomes the same extreme, and a
+/// NaN becomes silence. A sample written to [`WavCodec::Float32`] or
+/// [`WavCodec::Float64`] is written through as it is, overshoot, infinities
+/// and NaN included. A count of clipped samples is therefore a number about
+/// an integer encoding and not about a float one.
+///
+/// Read back through this crate, a NaN written to [`WavCodec::Float32`]
+/// returns the same bit pattern, and a NaN written to [`WavCodec::Float64`]
+/// returns silence, because narrowing a NaN from `f64` to `f32` normalises
+/// it. Both infinities return unchanged at either width.
+///
 /// # Example
 ///
 /// ```

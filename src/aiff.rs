@@ -14,7 +14,8 @@
 //! - **Eight-bit samples are signed.** The exact inverse of WAV's unsigned
 //!   convention, and not negotiable: it is what the two specifications say.
 //!   Getting it wrong offsets the audio by half full scale. See
-//!   [`SampleFormat::I8`].
+//!   [`SampleFormat::I8`]. The one exception is AIFF-C's `raw `, which names
+//!   offset-binary unsigned 8-bit and is [`SampleFormat::U8`].
 //! - **The sample rate is an 80-bit IEEE 754 extended-precision float.** Sign
 //!   bit, 15-bit exponent, and a 64-bit significand whose integer bit is
 //!   explicit, unlike a double's. No Rust primitive holds it, so it is parsed
@@ -47,10 +48,10 @@
 //! A `FORM` of type `AIFF` is uncompressed big-endian PCM by definition; a
 //! `FORM` of type `AIFC` names its encoding in `COMM`'s compression type.
 //! `alaw`/`ALAW` and `ulaw`/`ULAW` dispatch to the same G.711 tables WAV uses;
-//! `fl32`/`FL32` and `fl64`/`FL64` are IEEE float. Every other compression
-//! type (`ima4`, `MAC3`, `MAC6`, `QDMC` and the rest) is
-//! [`DecodeError::UnsupportedCodec`], reported as the four-CC it was. Nothing
-//! anywhere looks at a file name.
+//! `fl32`/`FL32` and `fl64`/`FL64` are IEEE float; `raw ` is unsigned 8-bit
+//! linear PCM. Every other compression type (`ima4`, `MAC3`, `MAC6`, `QDMC`
+//! and the rest) is [`DecodeError::UnsupportedCodec`], reported as the
+//! four-CC it was. Nothing anywhere looks at a file name.
 //!
 //! For the linear widths, dispatch is on the **(compression, sampleSize)
 //! pair**, the same rule as WAV's `(tag, bits)`: `NONE` covers four widths and
@@ -129,6 +130,10 @@ const TWOS: FourCc = FourCc(*b"twos");
 
 /// `sowt`: `twos` backwards, and little-endian two's-complement PCM.
 const SOWT: FourCc = FourCc(*b"sowt");
+
+/// `raw `: offset-binary, meaning unsigned, 8-bit linear PCM. The trailing
+/// space is part of the four-CC.
+const RAW: FourCc = FourCc(*b"raw ");
 
 /// The two spellings of IEEE 754 binary32.
 const FL32: [FourCc; 2] = [FourCc(*b"fl32"), FourCc(*b"FL32")];
@@ -311,6 +316,11 @@ pub enum AiffCodec {
     /// Signed 8-bit PCM, signed unlike WAV's. `NONE`, `twos` or `sowt` at
     /// 8 bits: one byte has no byte order.
     PcmI8,
+    /// Unsigned 8-bit PCM, offset binary. `raw ` at 8 bits, which the
+    /// compression field makes an AIFF-C encoding only. The same convention
+    /// WAV's 8-bit carries, under a four-CC that names it explicitly rather
+    /// than the implicit signedness of `NONE`.
+    PcmU8,
     /// Signed 16-bit big-endian PCM. `NONE` or `twos` at 16 bits.
     PcmI16,
     /// Signed 24-bit big-endian PCM. `NONE` or `twos` at 24 bits.
@@ -338,7 +348,10 @@ impl AiffCodec {
     ///
     /// A plain `AIFF` form has no compression field; its `NONE` is implicit,
     /// and the `COMM` parser passes it explicitly so a width rejection can
-    /// name it.
+    /// name it. That is also what confines the compression-only encodings to
+    /// `AIFC`: a plain `AIFF` form resolves as `NONE` whatever bytes follow
+    /// the four fixed `COMM` fields, so `raw `, `sowt`, the floats and G.711
+    /// are reachable from an `AIFC` form and from no other.
     ///
     /// For the linear types the dispatch is on the pair, never the four-CC
     /// alone. `NONE` covers four widths, and decoding one at another's
@@ -351,6 +364,9 @@ impl AiffCodec {
     ///
     /// assert_eq!(AiffCodec::resolve(FourCc(*b"NONE"), 24).unwrap(), AiffCodec::PcmI24);
     /// assert_eq!(AiffCodec::resolve(FourCc(*b"sowt"), 16).unwrap(), AiffCodec::PcmI16Sowt);
+    /// // `raw ` is unsigned 8-bit, and only at 8 bits.
+    /// assert_eq!(AiffCodec::resolve(FourCc(*b"raw "), 8).unwrap(), AiffCodec::PcmU8);
+    /// assert!(AiffCodec::resolve(FourCc(*b"raw "), 16).is_err());
     /// // Same compression, unsupported width: rejected, and it says which.
     /// assert!(AiffCodec::resolve(FourCc(*b"NONE"), 20).is_err());
     /// ```
@@ -376,6 +392,16 @@ impl AiffCodec {
                     format: CodecId::FourCc(compression),
                     bits_per_sample,
                 }),
+            };
+        }
+        if compression == RAW {
+            return if bits_per_sample == 8 {
+                Ok(Self::PcmU8)
+            } else {
+                Err(DecodeError::UnsupportedSampleFormat {
+                    format: CodecId::FourCc(compression),
+                    bits_per_sample,
+                })
             };
         }
         if FL32.contains(&compression) {
@@ -412,7 +438,7 @@ impl AiffCodec {
     /// How many bytes one sample occupies in the payload.
     pub const fn bytes_per_sample(self) -> usize {
         match self {
-            Self::PcmI8 | Self::ALaw | Self::MuLaw => 1,
+            Self::PcmI8 | Self::PcmU8 | Self::ALaw | Self::MuLaw => 1,
             Self::PcmI16 | Self::PcmI16Sowt => 2,
             Self::PcmI24 | Self::PcmI24Sowt => 3,
             Self::PcmI32 | Self::PcmI32Sowt | Self::Float32 => 4,
@@ -425,6 +451,7 @@ impl AiffCodec {
     pub const fn sample_format(self) -> Option<SampleFormat> {
         match self {
             Self::PcmI8 => Some(SampleFormat::I8),
+            Self::PcmU8 => Some(SampleFormat::U8),
             Self::PcmI16 => Some(SampleFormat::I16Be),
             Self::PcmI24 => Some(SampleFormat::I24Be),
             Self::PcmI32 => Some(SampleFormat::I32Be),
@@ -457,7 +484,7 @@ impl AiffCodec {
     /// reads back; 16 is written because it is the specification's own.
     pub const fn bits_per_sample(self) -> u16 {
         match self {
-            Self::PcmI8 => 8,
+            Self::PcmI8 | Self::PcmU8 => 8,
             Self::PcmI16 | Self::PcmI16Sowt | Self::ALaw | Self::MuLaw => 16,
             Self::PcmI24 | Self::PcmI24Sowt => 24,
             Self::PcmI32 | Self::PcmI32Sowt | Self::Float32 => 32,
@@ -478,6 +505,7 @@ impl AiffCodec {
     pub const fn compression_type(self) -> FourCc {
         match self {
             Self::PcmI8 | Self::PcmI16 | Self::PcmI24 | Self::PcmI32 => NONE,
+            Self::PcmU8 => RAW,
             Self::PcmI16Sowt | Self::PcmI24Sowt | Self::PcmI32Sowt => SOWT,
             Self::Float32 => FL32[0],
             Self::Float64 => FL64[0],
@@ -492,13 +520,14 @@ impl AiffCodec {
     /// uncompressed big-endian two's-complement PCM, so the four codecs that
     /// *are* that, [`PcmI8`](Self::PcmI8) through [`PcmI32`](Self::PcmI32),
     /// are written as plain `AIFF`, the more widely readable of the two
-    /// forms. Everything else, `sowt`, the floats and G.711, needs the
-    /// compression field that only `AIFC` has, and is written as `AIFC` with
-    /// the `FVER` chunk the specification requires.
+    /// forms. Everything else, `raw `, `sowt`, the floats and G.711, needs
+    /// the compression field that only `AIFC` has, and is written as `AIFC`
+    /// with the `FVER` chunk the specification requires.
     pub const fn form(self) -> AiffForm {
         match self {
             Self::PcmI8 | Self::PcmI16 | Self::PcmI24 | Self::PcmI32 => AiffForm::Aiff,
-            Self::PcmI16Sowt
+            Self::PcmU8
+            | Self::PcmI16Sowt
             | Self::PcmI24Sowt
             | Self::PcmI32Sowt
             | Self::Float32
@@ -1483,6 +1512,21 @@ fn aiff_form_size(form: AiffForm, data_bytes: u64) -> Option<u64> {
 /// [`WavWriter`](crate::WavWriter), which upgrades instead of refusing,
 /// because it has somewhere to upgrade to.
 ///
+/// # Samples outside full scale, and samples that are not finite
+///
+/// **The integer encodings clamp and the float encodings do not.** A sample
+/// outside `-1.0..=1.0` written to an integer or G.711 encoding becomes the
+/// extreme value rather than wrapping, an infinity becomes the same extreme,
+/// and a NaN becomes silence. A sample written to [`AiffCodec::Float32`] or
+/// [`AiffCodec::Float64`] is written through as it is, overshoot, infinities
+/// and NaN included. A count of clipped samples is therefore a number about
+/// an integer encoding and not about a float one.
+///
+/// Read back through this crate, a NaN written to [`AiffCodec::Float32`]
+/// returns the same bit pattern, and a NaN written to [`AiffCodec::Float64`]
+/// returns silence, because narrowing a NaN from `f64` to `f32` normalises
+/// it. Both infinities return unchanged at either width.
+///
 /// # Example
 ///
 /// ```
@@ -1767,8 +1811,9 @@ mod tests {
     #[test]
     fn dispatch_is_on_the_compression_and_the_width_together() {
         use AiffCodec::*;
-        let accepted: [(&[u8; 4], u16, AiffCodec); 15] = [
+        let accepted: [(&[u8; 4], u16, AiffCodec); 16] = [
             (b"NONE", 8, PcmI8),
+            (b"raw ", 8, PcmU8),
             (b"NONE", 16, PcmI16),
             (b"NONE", 24, PcmI24),
             (b"NONE", 32, PcmI32),
@@ -1819,6 +1864,12 @@ mod tests {
             (b"sowt", 20),
             (b"fl32", 16),
             (b"fl64", 32),
+            // `raw ` is the one unsigned encoding and exists at one width.
+            // Any other width is a width rejection, never a silent accept.
+            (b"raw ", 1),
+            (b"raw ", 16),
+            (b"raw ", 24),
+            (b"raw ", 32),
         ] {
             let error = AiffCodec::resolve(FourCc(*compression), bits).expect_err("must reject");
             assert!(
@@ -1833,7 +1884,11 @@ mod tests {
         }
 
         // A compression this crate does not carry names the four-CC it was.
-        for compression in [b"ima4", b"MAC3", b"MAC6", b"QDMC", b"GSM ", b"raw "] {
+        // Each of these five is a compression scheme, so carrying one would
+        // mean a decoder for it. `raw ` was in this list until 0.1.2 and is
+        // not a compression scheme; it is asserted above, accepted at 8 bits
+        // and rejected on width everywhere else.
+        for compression in [b"ima4", b"MAC3", b"MAC6", b"QDMC", b"GSM "] {
             let error = AiffCodec::resolve(FourCc(*compression), 16).expect_err("must reject");
             assert!(
                 matches!(&error, DecodeError::UnsupportedCodec { codec }
@@ -1845,8 +1900,9 @@ mod tests {
 
     #[test]
     fn every_codec_is_linear_or_companded_and_never_both() {
-        const ALL: [AiffCodec; 11] = [
+        const ALL: [AiffCodec; 12] = [
             AiffCodec::PcmI8,
+            AiffCodec::PcmU8,
             AiffCodec::PcmI16,
             AiffCodec::PcmI24,
             AiffCodec::PcmI32,
@@ -1863,6 +1919,7 @@ mod tests {
         for codec in ALL {
             match codec {
                 AiffCodec::PcmI8
+                | AiffCodec::PcmU8
                 | AiffCodec::PcmI16
                 | AiffCodec::PcmI24
                 | AiffCodec::PcmI32
@@ -2203,8 +2260,9 @@ mod tests {
     /// exactly when the form is AIFC.
     #[test]
     fn each_codec_selects_the_form_the_rule_states() {
-        let cases: [(AiffCodec, AiffForm); 11] = [
+        let cases: [(AiffCodec, AiffForm); 12] = [
             (AiffCodec::PcmI8, AiffForm::Aiff),
+            (AiffCodec::PcmU8, AiffForm::Aifc),
             (AiffCodec::PcmI16, AiffForm::Aiff),
             (AiffCodec::PcmI24, AiffForm::Aiff),
             (AiffCodec::PcmI32, AiffForm::Aiff),
