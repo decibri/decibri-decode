@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-//! Arbitrary encoded bytes in, mono `f32` at a declared sample rate out, with a
-//! stated and tested sample-count guarantee.
+//! Encoded audio bytes in, `f32` samples out, with the sample rate and channel
+//! count travelling with them and a stated and tested sample-count guarantee.
 //!
 //! That sentence is the crate. Codecs fill the contract in; they are not the
 //! contract. The trait boundaries, the error type and the buffer types are
