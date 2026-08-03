@@ -593,6 +593,66 @@ fn case_4_float_32_decodes_from_ieee_754_bit_patterns() {
     assert_same_samples(decoded.samples(), &expected, "32-bit float");
 }
 
+/// The clamp boundary, stated as bytes: what an integer target and a float
+/// target each write for a sample that is not finite.
+///
+/// This is the statement [`WavWriter`]'s documentation makes, so it is
+/// measured rather than asserted. The integer target clamps, taking NaN to
+/// silence and the infinities to the extremes; the float targets write the
+/// IEEE 754 bit patterns through. Every file below reads back.
+#[test]
+fn a_non_finite_sample_clamps_into_an_integer_target_and_passes_into_a_float_one() {
+    let samples: [f32; 3] = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+    let spec = AudioSpec::mono(48_000);
+
+    // The integer target: silence, then both extremes.
+    let integer = WavWriter::new(spec, WavCodec::PcmI16)
+        .to_bytes(&samples)
+        .expect("write i16");
+    let reader = WavReader::new(&integer).expect("read i16");
+    assert_eq!(reader.data(), [0x00, 0x00, 0xFF, 0x7F, 0x00, 0x80]);
+    assert_same_samples(
+        reader.decode_to_end().samples(),
+        &[0.0, 32_767.0 / 32_768.0, -1.0],
+        "i16 target",
+    );
+
+    // The 32-bit float target: the three bit patterns, little-endian, and
+    // every one of them survives the round trip exactly.
+    let float32 = WavWriter::new(spec, WavCodec::Float32)
+        .to_bytes(&samples)
+        .expect("write f32");
+    let reader = WavReader::new(&float32).expect("read f32");
+    assert_eq!(
+        reader.data(),
+        [0x00, 0x00, 0xC0, 0x7F, 0x00, 0x00, 0x80, 0x7F, 0x00, 0x00, 0x80, 0xFF]
+    );
+    let back = reader.decode_to_end();
+    assert_eq!(back.samples()[0].to_bits(), f32::NAN.to_bits());
+    assert_eq!(back.samples()[1], f32::INFINITY);
+    assert_eq!(back.samples()[2], f32::NEG_INFINITY);
+
+    // The 64-bit float target: the bit patterns widen and are written whole.
+    // The NaN comes back as silence, because narrowing a NaN from `f64` to
+    // `f32` normalises it; the infinities come back unchanged.
+    let float64 = WavWriter::new(spec, WavCodec::Float64)
+        .to_bytes(&samples)
+        .expect("write f64");
+    let reader = WavReader::new(&float64).expect("read f64");
+    assert_eq!(
+        reader.data(),
+        [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x7F, // NaN
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x7F, // +inf
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0xFF, // -inf
+        ]
+    );
+    let back = reader.decode_to_end();
+    assert_eq!(back.samples()[0].to_bits(), 0.0f32.to_bits());
+    assert_eq!(back.samples()[1], f32::INFINITY);
+    assert_eq!(back.samples()[2], f32::NEG_INFINITY);
+}
+
 /// Case 5: `WAVE_FORMAT_EXTENSIBLE` 0xFFFE with a PCM SubFormat GUID.
 ///
 /// The payload is byte-for-byte the same as the plain 16-bit control's, so the

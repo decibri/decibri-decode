@@ -30,8 +30,8 @@
 //! crate, not one that is wrong in a way its own reader mirrors.
 
 use decibri_decode::{
-    AiffCodec, AiffReader, AiffStreamDecoder, AiffWriter, AudioSpec, DecodeError, StreamSource,
-    WavCodec, WavReader, WavWriter,
+    AiffCodec, AiffReader, AiffStreamDecoder, AiffWriter, AudioSpec, DecodeError, FourCc,
+    StreamSource, WavCodec, WavReader, WavWriter,
 };
 
 // -- The reference builders, duplicated from aiff_conformance.rs --------------
@@ -231,8 +231,9 @@ type CodecRow = (AiffCodec, &'static [u8; 4], Option<&'static [u8; 4]>, u16);
 
 /// Every writable encoding. The exhaustive-match test below keeps this list
 /// honest against later `AiffCodec` variants.
-const CODECS: [CodecRow; 11] = [
+const CODECS: [CodecRow; 12] = [
     (AiffCodec::PcmI8, b"AIFF", None, 8),
+    (AiffCodec::PcmU8, b"AIFC", Some(b"raw "), 8),
     (AiffCodec::PcmI16, b"AIFF", None, 16),
     (AiffCodec::PcmI24, b"AIFF", None, 24),
     (AiffCodec::PcmI32, b"AIFF", None, 32),
@@ -253,6 +254,7 @@ fn codecs_lists_every_writable_encoding() {
     for (codec, _, _, _) in CODECS {
         match codec {
             AiffCodec::PcmI8
+            | AiffCodec::PcmU8
             | AiffCodec::PcmI16
             | AiffCodec::PcmI24
             | AiffCodec::PcmI32
@@ -266,7 +268,7 @@ fn codecs_lists_every_writable_encoding() {
             _ => panic!("a codec outside the writable set"),
         }
     }
-    assert_eq!(CODECS.len(), 11);
+    assert_eq!(CODECS.len(), 12);
 }
 
 // -- Gate 6: byte-for-byte agreement with the hand-built fixtures -------------
@@ -356,6 +358,80 @@ fn aiff_eight_bit_is_written_signed_and_fails_if_written_unsigned() {
         WavReader::new(&wav).expect("read WAV").data(),
         unsigned.as_slice(),
         "the WAV spelling of the same audio is the sign-bit flip of the AIFF one"
+    );
+}
+
+// -- The other eight-bit convention, written unsigned --------------------------
+
+/// `raw ` is the one AIFF-C encoding whose 8-bit samples are unsigned, and
+/// the failure it guards against is the inverse of the one above: a `raw `
+/// file written with the signed convention is offset by half full scale and
+/// nothing about its container says so. Every payload byte here is written
+/// out by hand from the offset-binary definition, and asserted to be the
+/// exact complement of the signed spelling the same audio takes under
+/// `NONE`.
+#[test]
+fn raw_eight_bit_is_written_unsigned_and_fails_if_written_signed() {
+    let samples: [f32; 6] = [
+        0.0,           // mid scale is 0x80, not 0x00
+        0.5,           // +64 above mid scale
+        -1.0,          // the most negative value is 0x00, not 0x80
+        127.0 / 128.0, // the most positive
+        -0.5,          // -64
+        -1.0 / 128.0,  // -1
+    ];
+    let unsigned: [u8; 6] = [0x80, 0xC0, 0x00, 0xFF, 0x40, 0x7F];
+    let signed: [u8; 6] = [0x00, 0x40, 0x80, 0x7F, 0xC0, 0xFF];
+
+    let written = AiffWriter::new(AudioSpec::mono(8_000), AiffCodec::PcmU8)
+        .to_bytes(&samples)
+        .expect("write");
+    let reader = AiffReader::new(&written).expect("read back");
+    assert_eq!(
+        reader.data(),
+        unsigned,
+        "the raw payload is not the offset-binary spelling"
+    );
+    assert_eq!(
+        reader.format().compression,
+        FourCc(*b"raw "),
+        "the file does not declare raw "
+    );
+    assert_eq!(reader.format().codec, AiffCodec::PcmU8);
+    assert_eq!(reader.format().bits_per_sample, 8);
+
+    // The whole file equals the hand-built AIFF-C fixture around those bytes.
+    assert_same_bytes(
+        &written,
+        &expected_file(b"AIFC", 1, 6, 8, 8_000, Some(b"raw "), &unsigned),
+        "raw fixture",
+    );
+
+    // The two eight-bit conventions are inverses byte for byte, so a writer
+    // that carried the signed convention into `raw ` would produce `signed`
+    // here and every byte would differ.
+    let complement: Vec<u8> = signed.iter().map(|byte| byte ^ 0x80).collect();
+    assert_eq!(unsigned.as_slice(), complement.as_slice());
+    let as_aiff_signed = AiffWriter::new(AudioSpec::mono(8_000), AiffCodec::PcmI8)
+        .to_bytes(&samples)
+        .expect("write signed");
+    assert_eq!(
+        AiffReader::new(&as_aiff_signed)
+            .expect("read signed")
+            .data(),
+        signed,
+        "the signed spelling of the same audio moved"
+    );
+
+    // And the same audio as an 8-bit WAV is byte-identical in the payload,
+    // since WAV's 8-bit and AIFF-C's `raw ` are the same convention.
+    let wav = WavWriter::new(AudioSpec::mono(8_000), WavCodec::PcmU8)
+        .to_bytes(&samples)
+        .expect("write WAV");
+    assert_eq!(
+        WavReader::new(&wav).expect("read WAV").data(),
+        unsigned,
+        "WAV's eight-bit and AIFF-C's raw are not the same spelling"
     );
 }
 
@@ -454,6 +530,65 @@ fn i32_and_f64_fixtures_agree_with_hand_spelled_payloads() {
     );
 }
 
+// -- The clamp boundary, as bytes ---------------------------------------------
+
+/// What an integer target and a float target each write for a sample that is
+/// not finite, in the big-endian spellings.
+///
+/// This is the statement [`AiffWriter`]'s documentation makes, so it is
+/// measured rather than asserted. Every file below reads back.
+#[test]
+fn a_non_finite_sample_clamps_into_an_integer_target_and_passes_into_a_float_one() {
+    let samples: [f32; 3] = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+    let spec = AudioSpec::mono(48_000);
+
+    // The integer target: silence, then both extremes, big-endian.
+    let integer = AiffWriter::new(spec, AiffCodec::PcmI16)
+        .to_bytes(&samples)
+        .expect("write i16");
+    let reader = AiffReader::new(&integer).expect("read i16");
+    assert_eq!(reader.data(), [0x00, 0x00, 0x7F, 0xFF, 0x80, 0x00]);
+    assert_same_samples(
+        reader.decode_to_end().samples(),
+        &[0.0, 32_767.0 / 32_768.0, -1.0],
+        "i16 target",
+    );
+
+    // The 32-bit float target: the three IEEE 754 bit patterns, big-endian,
+    // and every one of them survives the round trip exactly.
+    let float32 = AiffWriter::new(spec, AiffCodec::Float32)
+        .to_bytes(&samples)
+        .expect("write f32");
+    let reader = AiffReader::new(&float32).expect("read f32");
+    assert_eq!(
+        reader.data(),
+        [0x7F, 0xC0, 0x00, 0x00, 0x7F, 0x80, 0x00, 0x00, 0xFF, 0x80, 0x00, 0x00]
+    );
+    let back = reader.decode_to_end();
+    assert_eq!(back.samples()[0].to_bits(), f32::NAN.to_bits());
+    assert_eq!(back.samples()[1], f32::INFINITY);
+    assert_eq!(back.samples()[2], f32::NEG_INFINITY);
+
+    // The 64-bit float target: written whole, and the NaN comes back as
+    // silence because narrowing a NaN from `f64` to `f32` normalises it.
+    let float64 = AiffWriter::new(spec, AiffCodec::Float64)
+        .to_bytes(&samples)
+        .expect("write f64");
+    let reader = AiffReader::new(&float64).expect("read f64");
+    assert_eq!(
+        reader.data(),
+        [
+            0x7F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // NaN
+            0x7F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // +inf
+            0xFF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // -inf
+        ]
+    );
+    let back = reader.decode_to_end();
+    assert_eq!(back.samples()[0].to_bits(), 0.0f32.to_bits());
+    assert_eq!(back.samples()[1], f32::INFINITY);
+    assert_eq!(back.samples()[2], f32::NEG_INFINITY);
+}
+
 // -- Gate 7: round-trip identity by SHA-256 -----------------------------------
 
 /// Write, read, write: the bytes are a fixed point and the samples are a
@@ -523,8 +658,9 @@ fn every_written_encoding_round_trips_to_an_identical_sha256() {
 /// the round-trip gate cannot see.
 #[test]
 fn wav_and_aiff_written_from_the_same_audio_decode_bit_identically() {
-    let pairs: [(AiffCodec, WavCodec); 11] = [
+    let pairs: [(AiffCodec, WavCodec); 12] = [
         (AiffCodec::PcmI8, WavCodec::PcmU8),
+        (AiffCodec::PcmU8, WavCodec::PcmU8),
         (AiffCodec::PcmI16, WavCodec::PcmI16),
         (AiffCodec::PcmI24, WavCodec::PcmI24),
         (AiffCodec::PcmI32, WavCodec::PcmI32),
@@ -614,9 +750,12 @@ fn written_aiff_output_is_bit_identical_to_a_pinned_witness() {
             witness.extend_from_slice(&written);
         }
     }
+    // Re-pinned for 0.1.2, when the `raw ` row joined CODECS and so joined
+    // this sweep. The previous value, over the eleven encodings this witness
+    // covered in 0.1.1, was 0x7752_8810_54c9_236c.
     assert_eq!(
         fnv1a(witness),
-        0x7752_8810_54c9_236c,
+        0x9d62_68bf_b27c_4a80,
         "AIFF writer output changed"
     );
 }

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-08-03
+
+### Added
+
+- Unsigned 8-bit linear PCM in AIFF-C, under the `raw ` compression four-CC,
+  as `AiffCodec::PcmU8`. Read and written. `raw ` resolves at a `sampleSize`
+  of 8 and at no other width, where it is
+  `DecodeError::UnsupportedSampleFormat` naming the four-CC and the width. A
+  plain `AIFF` form has no compression field, so `raw ` is an AIFF-C encoding
+  only; `AiffCodec::form` answers `AiffForm::Aifc` for it and `AiffWriter`
+  writes it as `AIFC` with the `FVER` chunk. `ima4`, `MAC3`, `MAC6`, `QDMC`
+  and `GSM ` remain `DecodeError::UnsupportedCodec`.
+- Documentation on `WavWriter` and `AiffWriter` stating that the integer
+  encodings clamp and the float encodings do not: a sample outside
+  `-1.0..=1.0` written to an integer encoding becomes the extreme value, an
+  infinity becomes the same extreme and a NaN becomes silence, while a float
+  encoding writes the value through unchanged. Read back through this crate,
+  a NaN written at 32-bit float returns the same bit pattern and a NaN
+  written at 64-bit float returns silence.
+
+### Changed
+
+- The pinned AIFF read witness in `tests/aiff_conformance.rs` moved from
+  `0x428d_f9aa_ce0c_4172` to `0x34d1_5ab8_d25f_1822`, and the pinned AIFF
+  write witness in `tests/aiff_write_conformance.rs` from
+  `0x7752_8810_54c9_236c` to `0x9d62_68bf_b27c_4a80`. Both sweep every
+  encoding, so both gained the `raw ` row. With that row excluded each
+  witness reproduces its 0.1.1 value exactly; no byte of any previously
+  carried encoding moved. Every other witness in the crate is unchanged.
+
 ## [0.1.1] - 2026-08-03
 
 Documentation and package metadata only. The crate's behaviour is unchanged
