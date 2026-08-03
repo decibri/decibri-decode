@@ -1,4 +1,4 @@
-<!-- markdownlint-disable MD033 MD041 -->
+<!-- markdownlint-disable MD033 MD038 MD041 -->
 
 <p align="center">
   <a href="https://decibri.com">
@@ -13,10 +13,10 @@
 
 Turn audio into the format you need to work with.
 
-Get back mono `f32` at the sample rate you need from any WAV, AIFF or FLAC
-file, a stream arriving over a socket, or raw telephony audio with no header
-at all. Pure Rust, and the same bytes give you the same samples on every
-platform.
+Get back `f32` samples, with the sample rate and channel count travelling
+with them, from any WAV, AIFF or FLAC file, a stream arriving over a socket,
+or raw telephony audio with no header at all. Pure Rust, and the same bytes
+give you the same samples on every platform.
 
 <a href="https://crates.io/crates/decibri-decode"><img src="https://img.shields.io/crates/v/decibri-decode.svg" alt="Crates.io"></a>&nbsp;
 <a href="https://github.com/decibri/decibri-decode/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License"></a>
@@ -75,6 +75,19 @@ than flac 1.5.0 at the same level.
 
 Files are identified from their contents rather than their names. Headerless
 audio has no signature to identify, so you tell the crate what it is.
+
+## Mixing and rate conversion
+
+Samples come back the way the source holds them, interleaved and at the
+source's own rate, with the rate and channel count attached so nothing
+downstream has to guess. Mixing to mono is `downmix_to_mono`, which this crate
+provides. Changing the sample rate is
+[`decibri-resampler`](https://crates.io/crates/decibri-resampler), this
+crate's only dependency, so it is already in your tree. The first example
+below does both.
+
+A caller who wants stereo keeps it, and a caller who wants the source rate
+keeps it.
 
 ## Examples
 
@@ -227,8 +240,8 @@ every format at or below 24 significant bits, which covers 8-bit, 16-bit,
 `f32` holds and land on the nearest representable value. Nothing wraps and no
 sign flips.
 
-**No hidden rate policy.** Nothing defaults a sample rate and nothing branches
-on a file name.
+**No hidden rate policy.** Nothing defaults a sample rate, nothing converts
+one behind your back, and nothing branches on a file name.
 
 **No unsafe code in the library.** One integration test implements
 `GlobalAlloc`, a trait that is unsafe to implement by definition, to measure

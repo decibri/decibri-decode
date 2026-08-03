@@ -26,8 +26,12 @@ impl AudioSpec {
 
     /// Describes single-channel audio at `sample_rate`.
     ///
-    /// The shape the crate contract promises at its output: mono `f32` at a
-    /// declared rate.
+    /// Named because single-channel audio is stated by the caller often enough
+    /// to be worth one call rather than two arguments: a headerless G.711 or
+    /// PCM stream, or a mono file being written. Nothing in the crate produces
+    /// this shape on its own. A decode keeps the source's own channel count,
+    /// and mixing down to one channel is
+    /// [`downmix_to_mono`](crate::downmix_to_mono), called by whoever wants it.
     pub const fn mono(sample_rate: u32) -> Self {
         Self::new(sample_rate, 1)
     }
