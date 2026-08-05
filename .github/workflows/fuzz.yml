@@ -54,7 +54,7 @@ jobs:
       # that never fires, and a fuzzer with a dead sanitizer looks exactly
       # like one that found nothing.
       - name: Build the target
-        run: cargo +nightly-2026-07-01 fuzz build flac_recovery
+        run: cargo +nightly-2026-07-01 fuzz build --target x86_64-unknown-linux-gnu flac_recovery
 
       # -max_len=4096 is measured rather than conventional: at 4096 this
       # target reached 961 edges at 304 executions per second against 952 at
@@ -62,7 +62,7 @@ jobs:
       # half as much again in rate.
       - name: Run for 60 seconds
         run: |
-          cargo +nightly-2026-07-01 fuzz run flac_recovery -- \
+          cargo +nightly-2026-07-01 fuzz run --target x86_64-unknown-linux-gnu flac_recovery -- \
             -max_len=4096 -max_total_time=60 -print_final_stats=1 \
             -rss_limit_mb=2048 -timeout=25
 
