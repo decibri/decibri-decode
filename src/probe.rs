@@ -199,6 +199,12 @@ pub fn identify(bytes: &[u8]) -> Result<Container, DecodeError> {
 /// identical to constructing that reader by hand and calling its own
 /// `decode_to_end`, which is asserted rather than assumed.
 ///
+/// The channel count of the returned buffer is never zero, on every carried
+/// container. [`AudioSpec`](crate::AudioSpec) and
+/// [`AudioBuffer::from_samples`](crate::AudioBuffer::from_samples) accept zero
+/// from a caller who states it, and this is a guarantee about what a decode
+/// produces rather than about what the types can hold.
+///
 /// # Errors
 ///
 /// Everything [`identify`] returns, plus everything the chosen reader returns,

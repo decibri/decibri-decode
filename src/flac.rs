@@ -1764,6 +1764,10 @@ impl<'a> FlacReader<'a> {
 
     /// Decodes the whole stream, bound to the spec that describes it.
     ///
+    /// The channel count of the returned buffer is never zero: the format
+    /// codes it as one more than a three-bit field, so no stream can declare
+    /// none.
+    ///
     /// # Errors
     ///
     /// As [`decode`](Self::decode).

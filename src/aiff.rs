@@ -930,6 +930,10 @@ impl<'a> AiffReader<'a> {
     ///
     /// The reservation is from the payload's real length, never from a size
     /// the file declared.
+    ///
+    /// The channel count of the returned buffer is never zero: a file
+    /// declaring none is refused by [`new`](Self::new) with
+    /// [`DecodeError::UnsupportedChannelLayout`].
     pub fn decode_to_end(&self) -> AudioBuffer {
         let mut samples =
             Vec::with_capacity(self.data.len() / self.format.codec.bytes_per_sample());

@@ -1,0 +1,77 @@
+name: Fuzz
+
+# Manual only. This workflow is NOT on push and NOT on pull_request, and must
+# not be put on either: a coverage-guided run is minutes of runner time with a
+# nondeterministic verdict, which is the wrong shape for a required check. The
+# gate that runs on every pull request is tests/fuzz_seeded.rs, which is
+# deterministic, replays byte-for-byte and finishes in under a second.
+#
+# Linux only, as a decision rather than as an omission. cargo-fuzz on
+# x86_64-pc-windows-msvc needs an AddressSanitizer runtime whose LLVM version
+# matches the nightly's, supplied by hand with -L native, because -s none does
+# not link there and the MSVC-shipped runtime is many major versions behind.
+# None of that reproduces on a hosted runner. A green run here says nothing
+# about Windows and is not evidence that Windows works.
+#
+# Actions are pinned by commit SHA rather than by tag, which is a divergence
+# from ci.yml in this repository. This job runs a nightly toolchain with a
+# sanitizer over untrusted input, so the supply chain gets the tighter pin.
+
+on:
+  workflow_dispatch:
+
+# Read-only. This job checks out the source, builds it and runs it; it
+# publishes nothing and needs no write scope anywhere.
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz (FlacRecovery, ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Pinned by date, not by "nightly". The LLVM version this toolchain
+      # carries decides which AddressSanitizer runtime the build links, so the
+      # version is printed rather than assumed: a local reproduction of
+      # anything this job finds has to match it.
+      - name: Install the pinned nightly
+        run: |
+          rustup toolchain install nightly-2026-07-01 --profile minimal --component rust-src
+          rustup run nightly-2026-07-01 rustc --version --verbose
+
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2
+        with:
+          tool: cargo-fuzz
+
+      # Building and running are separate steps because they answer separate
+      # questions. A target that builds can still link a sanitizer runtime
+      # that never fires, and a fuzzer with a dead sanitizer looks exactly
+      # like one that found nothing.
+      - name: Build the target
+        run: cargo +nightly-2026-07-01 fuzz build flac_recovery
+
+      # -max_len=4096 is measured rather than conventional: at 4096 this
+      # target reached 961 edges at 304 executions per second against 952 at
+      # 201 for the same run uncapped, so the cap costs no coverage and buys
+      # half as much again in rate.
+      - name: Run for 60 seconds
+        run: |
+          cargo +nightly-2026-07-01 fuzz run flac_recovery -- \
+            -max_len=4096 -max_total_time=60 -print_final_stats=1 \
+            -rss_limit_mb=2048 -timeout=25
+
+      # The input that caused a finding, not just the line saying there was
+      # one. Without it a crash is a red cross and a log.
+      - name: Upload any crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
