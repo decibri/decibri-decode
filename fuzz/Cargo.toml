@@ -1,0 +1,36 @@
+[package]
+name = "decibri-decode-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Detaches this package from any workspace above it. `cargo fuzz init` in
+# cargo-fuzz 0.13.2 does not write this, and nothing needs it today: the crate
+# above is not a workspace and there is no Cargo.toml above that. It is needed
+# the moment either changes, and the failure it prevents is every cargo-fuzz
+# command refusing to run with "current package believes it's in a workspace
+# when it's not".
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.decibri-decode]
+path = ".."
+
+# The profile the pre-publish audit's 447 million executions were measured
+# under: optimised codegen with the checks that turn a silent wrap or a
+# violated internal contract into a catchable panic.
+[profile.release]
+overflow-checks = true
+debug-assertions = true
+
+[[bin]]
+name = "flac_recovery"
+path = "fuzz_targets/flac_recovery.rs"
+test = false
+doc = false
+bench = false

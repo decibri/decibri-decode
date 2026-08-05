@@ -17,7 +17,13 @@ categories = ["multimedia::audio", "multimedia::encoding"]
 # crate content. The consumable documentation, meaning the README, the examples
 # and the tests, all ships. CLAUDE.local.md is gitignored so cargo skips it
 # regardless; it is listed for intent.
-exclude = [".github/", "CLAUDE.md", "CLAUDE.local.md"]
+#
+# fuzz/ carries its own Cargo.toml, and cargo already omits a nested package
+# from the tarball on that basis alone, which was verified. This entry is the
+# second of the two mechanisms rather than the only one: it is the one visible
+# in this manifest, and the one that still holds if fuzz/Cargo.toml is moved
+# or renamed.
+exclude = [".github/", "CLAUDE.md", "CLAUDE.local.md", "fuzz/"]
 
 # No [features] section, deliberately. Give this crate bytes and it works out
 # what to do with them; a feature flag would mean identical bytes behaving

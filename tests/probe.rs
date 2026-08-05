@@ -456,6 +456,90 @@ fn every_carried_format_routes_to_the_reader_that_owns_it() {
     }
 }
 
+/// Where `id`'s chunk payload starts, searched for rather than computed from
+/// a header layout, so a fixture written in a different header style does not
+/// silently move the field the test overwrites.
+fn chunk_payload(bytes: &[u8], id: &[u8; 4]) -> usize {
+    let at = bytes
+        .windows(4)
+        .position(|window| window == id)
+        .unwrap_or_else(|| panic!("no {} chunk in the fixture", String::from_utf8_lossy(id)));
+    at + 8
+}
+
+/// No decode this crate performs produces a buffer with no channels.
+///
+/// Two halves, because the doc comments on [`decode`] and the three readers'
+/// `decode_to_end` state this as a guarantee and an unchecked guarantee is a
+/// claim. Every fixture in the sweep decodes to a positive channel count,
+/// through the probe and through its own reader; and a WAV and an AIFF whose
+/// declared channel count has been overwritten with zero are refused rather
+/// than decoded. FLAC has no third case: its channel count is coded as one
+/// more than a three-bit field, so there is no zero to overwrite.
+///
+/// The guarantee is about what a decode produces. `AudioSpec::new` and
+/// `AudioBuffer::from_samples` accept zero from a caller who states it, and
+/// that is deliberate and untouched here.
+#[test]
+fn no_decode_produces_a_buffer_with_no_channels() {
+    let mut fixtures = pcm_fixtures();
+    fixtures.extend(flac_fixtures());
+    assert!(fixtures.len() >= 10, "the sweep lost its fixtures");
+
+    for fixture in &fixtures {
+        let probed = decode(&fixture.bytes).expect("the fixture decodes through the probe");
+        assert_ne!(
+            probed.spec().channels,
+            0,
+            "{}: the probe produced no channels",
+            fixture.name
+        );
+        assert_ne!(
+            directly(fixture).spec().channels,
+            0,
+            "{}: its own reader produced no channels",
+            fixture.name
+        );
+    }
+
+    // WAV: wFormatTag then nChannels, little-endian, at the start of `fmt `.
+    let samples = audio(64, 1, 7);
+    let mut wav = WavWriter::new(AudioSpec::mono(16_000), WavCodec::PcmI16)
+        .to_bytes(&samples)
+        .expect("a mono WAV writes");
+    let at = chunk_payload(&wav, b"fmt ");
+    wav[at + 2..at + 4].copy_from_slice(&0u16.to_le_bytes());
+    assert!(
+        matches!(
+            WavReader::new(&wav),
+            Err(DecodeError::UnsupportedChannelLayout { channels: 0 })
+        ),
+        "a WAV declaring no channels was not refused"
+    );
+    assert!(
+        decode(&wav).is_err(),
+        "the probe decoded a WAV declaring no channels"
+    );
+
+    // AIFF: numChannels first, big-endian, at the start of `COMM`.
+    let mut aiff = AiffWriter::new(AudioSpec::mono(16_000), AiffCodec::PcmI16)
+        .to_bytes(&samples)
+        .expect("a mono AIFF writes");
+    let at = chunk_payload(&aiff, b"COMM");
+    aiff[at..at + 2].copy_from_slice(&0u16.to_be_bytes());
+    assert!(
+        matches!(
+            AiffReader::new(&aiff),
+            Err(DecodeError::UnsupportedChannelLayout { channels: 0 })
+        ),
+        "an AIFF declaring no channels was not refused"
+    );
+    assert!(
+        decode(&aiff).is_err(),
+        "the probe decoded an AIFF declaring no channels"
+    );
+}
+
 /// The name a file arrives under decides nothing, for all three formats.
 ///
 /// Written to real files with lying extensions and read back, because the

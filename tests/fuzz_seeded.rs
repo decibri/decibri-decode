@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-//! A seeded, deterministic fuzz gate over every parser reachable from the
-//! public API.
+//! A seeded, deterministic fuzz gate over every public entry point that takes
+//! arbitrary bytes.
 //!
 //! # What this is, and what it is not
 //!
@@ -27,11 +27,30 @@
 //! frame run cut from it. Mutations start from structurally real files
 //! because random bytes rarely survive a magic check: the depth of a parser
 //! a fuzzer reaches is bounded by how real its inputs look.
+//!
+//! # The headerless decoders
+//!
+//! [`PcmDecoder`] and [`G711Decoder`] parse nothing. A headerless stream
+//! carries no header to check a caller's claim against, so the format, the
+//! law and the layout are asserted at construction and every byte after that
+//! is audio. They are driven here for the property the file's title states:
+//! taking arbitrary bytes is what they have in common with a parser, and the
+//! stall a mis-implemented `feed` produces is the same stall a mis-implemented
+//! `push` produces.
+//!
+//! The sample format, the companding law and the channel count are a varied
+//! dimension rather than a fixed choice: drawn from a generator of their own
+//! over the mutation run, so the mutation schedule above them is unchanged by
+//! their presence, and cycled over the much shorter unmutated-seed run, where
+//! a draw is too short to be relied on. Both runs assert at the end which
+//! values were actually reached, rather than reading the spread off the
+//! tables they came from.
 
 use decibri_decode::{
     decode, identify, AiffCodec, AiffStreamDecoder, AiffWriter, AudioSpec, AudioStreamDecoder,
-    FlacFrameReader, FlacReader, FlacRecovery, FlacStreamDecoder, FlacWriter, StreamSource,
-    WavCodec, WavHeaderStyle, WavStreamDecoder, WavWriter,
+    Decoder, FlacFrameReader, FlacReader, FlacRecovery, FlacStreamDecoder, FlacWriter, G711Decoder,
+    G711Law, PcmDecoder, SampleFormat, StreamSource, WavCodec, WavHeaderStyle, WavStreamDecoder,
+    WavWriter,
 };
 
 /// How many mutated inputs each seed family contributes. Sized so the whole
@@ -260,9 +279,186 @@ fn drive(source: &mut dyn StreamSource, data: &[u8], chunk: usize, out: &mut Vec
     let _ = source.pull(out, usize::MAX);
 }
 
-/// Every parser in the crate, over one input. Errors are the expected
-/// currency here and are discarded; a panic is the failure.
-fn exercise(data: &[u8], chunk: usize, out: &mut Vec<f32>) {
+/// Every sample format the crate reads: each width once per byte order, and
+/// the two one-byte formats that have no byte order to vary.
+const PCM_FORMATS: [SampleFormat; 12] = [
+    SampleFormat::U8,
+    SampleFormat::I8,
+    SampleFormat::I16Le,
+    SampleFormat::I16Be,
+    SampleFormat::I24Le,
+    SampleFormat::I24Be,
+    SampleFormat::I32Le,
+    SampleFormat::I32Be,
+    SampleFormat::F32Le,
+    SampleFormat::F32Be,
+    SampleFormat::F64Le,
+    SampleFormat::F64Be,
+];
+
+/// Both companding laws, so neither G.711 table is the one the gate skips.
+const G711_LAWS: [G711Law; 2] = [G711Law::MuLaw, G711Law::ALaw];
+
+/// The channel counts the headerless decoders are driven at.
+///
+/// Zero is in the list because [`AudioSpec`] accepts it and both decoders
+/// document what they do with it, so it is a reachable state rather than an
+/// impossible one. Three divides none of the widths above, so an input that
+/// ends on a sample boundary at three channels rarely ends on a frame one.
+const HEADERLESS_CHANNELS: [u16; 5] = [0, 1, 2, 3, 8];
+
+/// The rate every headerless draw is made at.
+///
+/// Fixed rather than varied: no code path in either decoder reads it, so a
+/// second value would widen the matrix without widening the coverage.
+const HEADERLESS_RATE: u32 = 16_000;
+
+/// One draw of the headerless dimension: what a caller claims the bytes are.
+///
+/// Nothing in either decoder can check any of it, so every combination is a
+/// legal thing to assert and the gate has to survive all of them.
+#[derive(Clone, Copy)]
+struct Headerless {
+    format: SampleFormat,
+    law: G711Law,
+    spec: AudioSpec,
+}
+
+impl Headerless {
+    /// A draw from `rng`, which is a generator of its own so that adding this
+    /// dimension leaves the mutation stream above it byte-for-byte unchanged,
+    /// and so that the format cannot lock to one chunk size the way indexing
+    /// both by the iteration number would.
+    ///
+    /// Used where the run is long enough for a draw to reach every value,
+    /// which is asserted rather than assumed.
+    fn draw(rng: &mut Rng) -> Self {
+        Self {
+            format: PCM_FORMATS[rng.below(PCM_FORMATS.len())],
+            law: G711_LAWS[rng.below(G711_LAWS.len())],
+            spec: AudioSpec::new(
+                HEADERLESS_RATE,
+                HEADERLESS_CHANNELS[rng.below(HEADERLESS_CHANNELS.len())],
+            ),
+        }
+    }
+
+    /// The `index`th step of a cycle through all three tables at once.
+    ///
+    /// Used where the run is a few dozen inputs rather than a few thousand.
+    /// The table lengths are 12, 2 and 5, so a cycle long enough to exhaust
+    /// the longest exhausts all three, and no run of that length has to rely
+    /// on a draw happening to be even.
+    fn cycle(index: usize) -> Self {
+        Self {
+            format: PCM_FORMATS[index % PCM_FORMATS.len()],
+            law: G711_LAWS[index % G711_LAWS.len()],
+            spec: AudioSpec::new(
+                HEADERLESS_RATE,
+                HEADERLESS_CHANNELS[index % HEADERLESS_CHANNELS.len()],
+            ),
+        }
+    }
+}
+
+/// What a run of draws actually reached, so the spread is asserted from
+/// observation rather than from the tables it was drawn from.
+#[derive(Default)]
+struct Reached {
+    formats: Vec<SampleFormat>,
+    laws: Vec<G711Law>,
+    channels: Vec<u16>,
+}
+
+impl Reached {
+    /// Notes one draw.
+    fn record(&mut self, draw: &Headerless) {
+        if !self.formats.contains(&draw.format) {
+            self.formats.push(draw.format);
+        }
+        if !self.laws.contains(&draw.law) {
+            self.laws.push(draw.law);
+        }
+        if !self.channels.contains(&draw.spec.channels) {
+            self.channels.push(draw.spec.channels);
+        }
+    }
+
+    /// Fails unless every value in every table above was actually drawn.
+    ///
+    /// A drawn dimension that happened to miss half its table would report a
+    /// spread it did not have, and the miss would be silent.
+    fn assert_every_value_was_reached(&self) {
+        for format in PCM_FORMATS {
+            assert!(
+                self.formats.contains(&format),
+                "no headerless dimension reached {format:?}"
+            );
+        }
+        for law in G711_LAWS {
+            assert!(
+                self.laws.contains(&law),
+                "no headerless dimension reached {law:?}"
+            );
+        }
+        for channels in HEADERLESS_CHANNELS {
+            assert!(
+                self.channels.contains(&channels),
+                "no headerless dimension reached {channels} channel(s)"
+            );
+        }
+    }
+}
+
+/// Drives a [`Decoder`] over `data` in `chunk`-byte pieces the way the trait
+/// documents, tolerating errors and stopping on the documented terminal
+/// state, so the only way this fails is a panic or a stall the bounded loop
+/// turns into one.
+fn drive_decoder(decoder: &mut dyn Decoder, data: &[u8], chunk: usize, out: &mut Vec<f32>) {
+    for piece in data.chunks(chunk.max(1)) {
+        let mut offset = 0;
+        let mut stalls = 0u32;
+        while offset < piece.len() {
+            match decoder.feed(&piece[offset..]) {
+                Ok(0) => match decoder.decode(out) {
+                    // Nothing taken and nothing ready leaves a caller
+                    // following the documented loop with no way forward, so
+                    // pushing on would loop forever, which is the finding.
+                    Ok(0) => {
+                        stalls += 1;
+                        assert!(
+                            stalls <= 2,
+                            "a live decoder took no bytes and produced no samples"
+                        );
+                    }
+                    Ok(_) => stalls = 0,
+                    Err(_) => return,
+                },
+                Ok(taken) => {
+                    offset += taken;
+                    stalls = 0;
+                    if decoder.decode(out).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+    }
+    let _ = decoder.flush(out);
+    // `reset` returns the decoder to its just-constructed state, so the same
+    // bytes have to be drivable again through the same instance, including
+    // after the flush above rejected them.
+    decoder.reset();
+    let _ = decoder.feed(data);
+    let _ = decoder.decode(out);
+    let _ = decoder.flush(out);
+}
+
+/// Every parser in the crate and both headerless decoders, over one input.
+/// Errors are the expected currency here and are discarded; a panic is the
+/// failure.
+fn exercise(data: &[u8], chunk: usize, headerless: Headerless, out: &mut Vec<f32>) {
     let _ = identify(data);
     let _ = decode(data);
     if let Ok(reader) = FlacReader::new(data) {
@@ -285,37 +481,66 @@ fn exercise(data: &[u8], chunk: usize, out: &mut Vec<f32>) {
     drive(&mut FlacStreamDecoder::new(), data, chunk, out);
     out.clear();
     drive(&mut FlacStreamDecoder::frames(), data, chunk, out);
+
+    out.clear();
+    drive_decoder(
+        &mut PcmDecoder::new(headerless.format, headerless.spec),
+        data,
+        chunk,
+        out,
+    );
+    out.clear();
+    drive_decoder(
+        &mut G711Decoder::new(headerless.law, headerless.spec),
+        data,
+        chunk,
+        out,
+    );
 }
 
 #[test]
 fn no_seeded_mutation_panics_any_parser() {
     let seeds = seeds();
+    let mut reached = Reached::default();
     // Two fixed generators rather than one, so a schedule change in half the
     // run cannot silently shorten the other half's coverage.
     for seed in [0x5EED_0001_u64, 0xD15E_A5ED] {
         let mut rng = Rng(u64::from(seed as u32) | 1);
+        let mut dimension = Rng(seed ^ 0x0DEC_0DE5_0DEC_0DE5);
         let mut out = Vec::new();
         for iteration in 0..ITERATIONS {
             let data = mutate(&mut rng, &seeds);
             // Chunk sizes cycle so streaming state machines meet every input
             // at several boundaries, including mid-header ones.
             let chunk = [1, 3, 7, 64, 1_021, usize::MAX][iteration % 6];
-            exercise(&data, chunk, &mut out);
+            let headerless = Headerless::draw(&mut dimension);
+            reached.record(&headerless);
+            exercise(&data, chunk, headerless, &mut out);
         }
     }
+    reached.assert_every_value_was_reached();
 }
 
 #[test]
 fn the_unmutated_seeds_and_every_regression_input_decode_without_panicking() {
     let mut out = Vec::new();
+    let mut reached = Reached::default();
+    let mut step = 0usize;
     for seed in seeds() {
         for chunk in [1, 7, usize::MAX] {
-            exercise(&seed, chunk, &mut out);
+            let headerless = Headerless::cycle(step);
+            step += 1;
+            reached.record(&headerless);
+            exercise(&seed, chunk, headerless, &mut out);
         }
     }
     for input in REGRESSIONS {
         for chunk in [1, 7, usize::MAX] {
-            exercise(input, chunk, &mut out);
+            let headerless = Headerless::cycle(step);
+            step += 1;
+            reached.record(&headerless);
+            exercise(input, chunk, headerless, &mut out);
         }
     }
+    reached.assert_every_value_was_reached();
 }
