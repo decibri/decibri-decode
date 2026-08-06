@@ -20,11 +20,12 @@
 //!   reference path, where a wrong-rate reference is accepted silently and
 //!   cancels nothing.
 //! - **Guarantee:** the number of samples produced for a given input is stated
-//!   and tested, not incidental. Decoding a source of `n` frames without rate
-//!   conversion yields exactly `n * channels` samples. Decoding with rate
-//!   conversion yields exactly the count `decibri-resampler` states for that
-//!   rate pair and input length. A codec that cannot state its output count
-//!   does not go behind [`Decoder`].
+//!   and tested, not incidental. Decoding a source of `n` frames yields exactly
+//!   `n * channels` samples, and there is no rate conversion here for that
+//!   count to be conditional on. A caller who goes on to resample gets the
+//!   count [`decibri_resampler`] states for that rate pair and input length,
+//!   which is that crate's guarantee rather than this one's. A codec that
+//!   cannot state its output count does not go behind [`Decoder`].
 //! - **Failure:** every rejection is a [`DecodeError`] that names the specific
 //!   thing it rejected. "Unsupported" on its own tells a caller nothing they
 //!   can act on.

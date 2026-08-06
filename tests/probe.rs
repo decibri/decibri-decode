@@ -21,6 +21,10 @@
 //!    sample ready limit
 //! 7. input length below the probe length, at every value from zero to eleven
 //! 8. the name the bytes arrived under, which must never decide anything
+//! 9. the detail the streaming probe reports about the reader it chose, and
+//!    the three points at which it has none to report: before identification,
+//!    for a format the accessor is not about, and after identification but
+//!    before the header chunk carrying the detail has arrived
 //!
 //! # Dimension 2 is the one this suite exists for
 //!
@@ -49,8 +53,8 @@ use std::path::PathBuf;
 
 use decibri_decode::{
     decode, identify, AiffCodec, AiffReader, AiffWriter, AudioBuffer, AudioSpec,
-    AudioStreamDecoder, Container, DecodeError, FlacReader, RiffFlavour, StreamSource, WavCodec,
-    WavReader, WavWriter,
+    AudioStreamDecoder, Container, DecodeError, FlacReader, Md5Check, RiffFlavour, StreamSource,
+    WavCodec, WavReader, WavWriter,
 };
 
 // --- Fixtures ---------------------------------------------------------------
@@ -958,4 +962,208 @@ fn a_sample_of_the_flac_corpus_routes_through_the_probe() {
         checked += 1;
     }
     println!("{checked} corpus files routed identically through the probe");
+}
+
+// --- Group 3: the detail the front door reaches -----------------------------
+
+/// Pushes `bytes` through the streaming probe in `chunk`-byte pieces, finishes
+/// the stream and hands the decoder back so its accessors can be read.
+fn streamed_to_end(bytes: &[u8], chunk: usize) -> AudioStreamDecoder {
+    let mut decoder = AudioStreamDecoder::new();
+    let mut samples = Vec::new();
+    for piece in bytes.chunks(chunk) {
+        let mut offset = 0;
+        while offset < piece.len() {
+            offset += decoder.push(&piece[offset..]).expect("a piece pushes");
+            while decoder.pull(&mut samples, usize::MAX).expect("a pull") > 0 {}
+        }
+    }
+    decoder.finish(&mut samples).expect("the stream ends");
+    decoder
+}
+
+/// Every detail accessor on a decoder that has not identified anything yet.
+///
+/// Dimension 9's first case. A fresh decoder and one holding eleven bytes are
+/// both before identification, and neither has an inner reader to ask.
+#[test]
+fn no_detail_accessor_answers_before_the_stream_is_identified() {
+    let sources: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "a WAV prefix",
+            WavWriter::new(AudioSpec::mono(8_000), WavCodec::PcmI16)
+                .to_bytes(&audio(8, 1, 1))
+                .expect("a WAV writes"),
+        ),
+        (
+            "an AIFF prefix",
+            AiffWriter::new(AudioSpec::mono(8_000), AiffCodec::PcmI16)
+                .to_bytes(&audio(8, 1, 1))
+                .expect("an AIFF writes"),
+        ),
+        ("a FLAC prefix", RFC_EXAMPLE_1.to_vec()),
+    ];
+
+    let fresh = AudioStreamDecoder::new();
+    assert_eq!(fresh.container(), None);
+    assert_eq!(fresh.wav_format(), None);
+    assert_eq!(fresh.aiff_format(), None);
+    assert_eq!(fresh.flac_stream_info(), None);
+    assert_eq!(fresh.flac_md5_check(), None);
+
+    for (name, bytes) in &sources {
+        // Every length short of the probe length, one byte at a time, so the
+        // assertion covers the whole of the pre-identification window rather
+        // than one point in it.
+        let mut decoder = AudioStreamDecoder::new();
+        for byte in &bytes[..Container::PROBE_BYTES - 1] {
+            assert_eq!(decoder.container(), None, "{name}");
+            assert_eq!(decoder.wav_format(), None, "{name}");
+            assert_eq!(decoder.aiff_format(), None, "{name}");
+            assert_eq!(decoder.flac_stream_info(), None, "{name}");
+            assert_eq!(decoder.flac_md5_check(), None, "{name}");
+            decoder
+                .push(std::slice::from_ref(byte))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+    }
+}
+
+/// Identification is not the header, and the accessors do not pretend it is.
+///
+/// Dimension 9's third case: at exactly twelve bytes the container is known
+/// on every carried format, and the chunk carrying the detail has arrived on
+/// none of them.
+#[test]
+fn identification_alone_answers_no_detail_accessor() {
+    let cases: Vec<(&str, Vec<u8>, Container)> = vec![
+        (
+            "RIFF/WAVE",
+            WavWriter::new(AudioSpec::mono(8_000), WavCodec::PcmI16)
+                .to_bytes(&audio(8, 1, 1))
+                .expect("a WAV writes"),
+            Container::Wav,
+        ),
+        (
+            "FORM/AIFF",
+            AiffWriter::new(AudioSpec::mono(8_000), AiffCodec::PcmI16)
+                .to_bytes(&audio(8, 1, 1))
+                .expect("an AIFF writes"),
+            Container::Aiff,
+        ),
+        ("fLaC", RFC_EXAMPLE_1.to_vec(), Container::Flac),
+    ];
+
+    for (name, bytes, container) in &cases {
+        let mut decoder = AudioStreamDecoder::new();
+        assert_eq!(
+            decoder
+                .push(&bytes[..Container::PROBE_BYTES])
+                .unwrap_or_else(|error| panic!("{name}: {error}")),
+            Container::PROBE_BYTES,
+            "{name}"
+        );
+        assert_eq!(decoder.container(), Some(*container), "{name}");
+        assert_eq!(decoder.wav_format(), None, "{name}");
+        assert_eq!(decoder.aiff_format(), None, "{name}");
+        assert_eq!(decoder.flac_stream_info(), None, "{name}");
+        assert_eq!(decoder.flac_md5_check(), None, "{name}");
+    }
+}
+
+/// Every accessor gives exactly what the whole-file reader for that format
+/// gives, on every fixture, and gives nothing on the formats it is not about.
+///
+/// The oracle is the whole-file reader rather than the streaming one, so this
+/// is not the delegation checking itself: the fourth coverage lesson on this
+/// crate is that a test whose reference is computed by the path under test
+/// proves only self-consistency.
+#[test]
+fn every_detail_accessor_matches_the_reader_that_owns_the_format() {
+    for fixture in pcm_fixtures().iter().chain(flac_fixtures().iter()) {
+        let name = fixture.name;
+        // 509 is prime and unrelated to any chunk boundary, so the detail is
+        // read off a stream that arrived in pieces rather than in one push.
+        let decoder = streamed_to_end(&fixture.bytes, 509);
+        assert_eq!(decoder.container(), Some(fixture.container), "{name}");
+
+        match fixture.container {
+            Container::Wav => {
+                let expected = *WavReader::new(&fixture.bytes)
+                    .expect("the WAV fixture opens")
+                    .format();
+                assert_eq!(decoder.wav_format(), Some(expected), "{name}");
+                assert_eq!(decoder.aiff_format(), None, "{name}");
+                assert_eq!(decoder.flac_stream_info(), None, "{name}");
+                assert_eq!(decoder.flac_md5_check(), None, "{name}");
+            }
+            Container::Aiff => {
+                let expected = *AiffReader::new(&fixture.bytes)
+                    .expect("the AIFF fixture opens")
+                    .format();
+                assert_eq!(decoder.aiff_format(), Some(expected), "{name}");
+                assert_eq!(decoder.wav_format(), None, "{name}");
+                assert_eq!(decoder.flac_stream_info(), None, "{name}");
+                assert_eq!(decoder.flac_md5_check(), None, "{name}");
+            }
+            Container::Flac => {
+                let expected = *FlacReader::new(&fixture.bytes)
+                    .expect("the FLAC fixture opens")
+                    .stream_info();
+                assert_eq!(decoder.flac_stream_info(), Some(expected), "{name}");
+                // The verdict follows from the streaminfo field rather than
+                // from what the streaming reader reported, so the two are
+                // independent.
+                let verdict = if expected.md5.is_some() {
+                    Md5Check::Verified
+                } else {
+                    Md5Check::ChecksumUnset
+                };
+                assert_eq!(decoder.flac_md5_check(), Some(verdict), "{name}");
+                assert_eq!(decoder.wav_format(), None, "{name}");
+                assert_eq!(decoder.aiff_format(), None, "{name}");
+            }
+            _ => panic!("{name}: a container with no accessor case"),
+        }
+    }
+}
+
+/// The MD5 verdict is reported at the end of the stream and not before.
+///
+/// A caller must not be able to read a guarantee off a decode that has not
+/// finished, so `flac_md5_check` stays `None` while the audio is still
+/// arriving even though the streaminfo it will be checked against is long
+/// since known.
+#[test]
+fn the_flac_md5_verdict_arrives_only_when_the_stream_does() {
+    let bytes = RFC_EXAMPLE_1;
+    let mut decoder = AudioStreamDecoder::new();
+    let mut samples = Vec::new();
+    let mut seen_stream_info = false;
+
+    for piece in bytes.chunks(7) {
+        let mut offset = 0;
+        while offset < piece.len() {
+            offset += decoder.push(&piece[offset..]).expect("a piece pushes");
+            while decoder.pull(&mut samples, usize::MAX).expect("a pull") > 0 {}
+        }
+        seen_stream_info |= decoder.flac_stream_info().is_some();
+        assert_eq!(
+            decoder.flac_md5_check(),
+            None,
+            "a verdict was reported before the stream ended"
+        );
+    }
+    assert!(
+        seen_stream_info,
+        "the streaminfo was never reported while the stream ran"
+    );
+
+    decoder.finish(&mut samples).expect("the stream ends");
+    assert_eq!(decoder.flac_md5_check(), Some(Md5Check::Verified));
+
+    // Reset drops it with everything else the header taught the reader.
+    decoder.reset();
+    assert_eq!(decoder.flac_stream_info(), None);
+    assert_eq!(decoder.flac_md5_check(), None);
 }

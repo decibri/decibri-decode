@@ -21,8 +21,12 @@ name: Fuzz
 on:
   workflow_dispatch:
   schedule:
-    # Weekly, Mondays at 05:23 UTC.
-    - cron: '23 5 * * 1'
+    # Twice weekly, Mondays and Thursdays at 05:23 UTC. Twice rather than
+    # once because the corpus cache below is evicted after seven days without
+    # a read, and a weekly schedule reads it exactly every seven days: no
+    # margin, and a silent failure at the boundary. Three and four days apart
+    # puts every read well inside the window.
+    - cron: '23 5 * * 1,4'
 
 # Read-only. This job checks out the source, builds it and runs it; it
 # publishes nothing and needs no write scope anywhere.
@@ -104,11 +108,38 @@ jobs:
           cargo +nightly-2026-07-01 fuzz build \
             --target x86_64-unknown-linux-gnu ${{ matrix.fuzz_target }}
 
+      # What the previous run left behind. Without this the corpus is
+      # destroyed with the runner and every run rediscovers the same ground
+      # from the same committed floor: the first scheduled run grew the nine
+      # targets by between 3x and 49x, and kept none of it.
+      #
+      # The key carries the run id, so it never hits exactly and the post-job
+      # save always writes a fresh entry; restore-keys matches the most recent
+      # entry for this target by prefix. That is the rolling-cache shape,
+      # which is what an accumulating corpus needs.
+      #
+      # A miss is not a failure. The step below copies the committed seeds and
+      # minimised corpus in afterwards either way, so a run with no cache
+      # starts from the committed floor, which is what every run did before
+      # this step existed. A job that fails because a cache was cold is worse
+      # than a shallow one, on a schedule nobody is watching.
+      - name: Restore the accumulated corpus
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: fuzz/corpus/${{ matrix.fuzz_target }}
+          key: fuzz-corpus-${{ matrix.fuzz_target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.fuzz_target }}-
+
       # The committed seeds are what a cold run starts from; the committed
-      # minimised corpus, where there is one, is the floor under that. No
-      # cache is consulted: GitHub evicts a cache not read for seven days and
-      # a weekly schedule reads it every seven days, so a cache here would
-      # fail silently at the boundary.
+      # minimised corpus, where there is one, is the floor under that. Both
+      # are copied in after any cache restore rather than instead of one, so
+      # the floor holds whether the cache hit or missed.
+      #
+      # The entry count is logged here, before the run reads the directory, so
+      # a lost cache is visible in the job summary: a target that normally
+      # starts from nine hundred entries and reports forty-five has plainly
+      # not been restored.
       - name: Assemble the corpus
         run: |
           target=${{ matrix.fuzz_target }}
