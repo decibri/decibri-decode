@@ -54,8 +54,9 @@ use std::path::{Path, PathBuf};
 
 /// The file extensions this gate treats as text.
 ///
-/// Everything the repository tracks is one of these; a binary fixture would
-/// be neither.
+/// The tracked source is all one of these. The fuzz seeds and the committed
+/// fuzz corpus under `fuzz/` are tracked bytes rather than tracked text: they
+/// carry no extension and are not checked here.
 const TEXT: &[&str] = &["rs", "md", "toml", "yml", "yaml", "lock", "txt"];
 
 /// Directory names never descended into: build output and git's own store.

@@ -28,9 +28,69 @@ path = ".."
 overflow-checks = true
 debug-assertions = true
 
+# One entry per target, and nothing else in `fuzz_targets/` is a target:
+# `stream_driver.rs` is a module the four targets that drive a `StreamSource`
+# share, and cargo only builds what this table names.
+
+[[bin]]
+name = "probe_whole_file"
+path = "fuzz_targets/probe_whole_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "probe_streaming"
+path = "fuzz_targets/probe_streaming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wav_streaming"
+path = "fuzz_targets/wav_streaming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aiff_streaming"
+path = "fuzz_targets/aiff_streaming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flac_whole_file"
+path = "fuzz_targets/flac_whole_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flac_frames"
+path = "fuzz_targets/flac_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flac_stream_info"
+path = "fuzz_targets/flac_stream_info.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "flac_recovery"
 path = "fuzz_targets/flac_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "writers"
+path = "fuzz_targets/writers.rs"
 test = false
 doc = false
 bench = false

@@ -1,10 +1,11 @@
 name: Fuzz
 
-# Manual only. This workflow is NOT on push and NOT on pull_request, and must
-# not be put on either: a coverage-guided run is minutes of runner time with a
-# nondeterministic verdict, which is the wrong shape for a required check. The
-# gate that runs on every pull request is tests/fuzz_seeded.rs, which is
-# deterministic, replays byte-for-byte and finishes in under a second.
+# Manual and scheduled only. This workflow is NOT on push and NOT on
+# pull_request, and must not be put on either: a coverage-guided run is
+# minutes of runner time per target with a nondeterministic verdict, which is
+# the wrong shape for a required check. The gate that runs on every pull
+# request is tests/fuzz_seeded.rs, which is deterministic, replays
+# byte-for-byte and finishes in under a second.
 #
 # Linux only, as a decision rather than as an omission. cargo-fuzz on
 # x86_64-pc-windows-msvc needs an AddressSanitizer runtime whose LLVM version
@@ -19,6 +20,9 @@ name: Fuzz
 
 on:
   workflow_dispatch:
+  schedule:
+    # Weekly, Mondays at 05:23 UTC.
+    - cron: '23 5 * * 1'
 
 # Read-only. This job checks out the source, builds it and runs it; it
 # publishes nothing and needs no write scope anywhere.
@@ -31,8 +35,23 @@ concurrency:
 
 jobs:
   fuzz:
-    name: Fuzz (FlacRecovery, ubuntu-latest)
+    name: Fuzz (${{ matrix.fuzz_target }}, ubuntu-latest)
     runs-on: ubuntu-latest
+    strategy:
+      # Every target runs whatever the others do. A crash in one is not a
+      # reason to stop looking in the other eight.
+      fail-fast: false
+      matrix:
+        fuzz_target:
+          - probe_whole_file
+          - probe_streaming
+          - wav_streaming
+          - aiff_streaming
+          - flac_whole_file
+          - flac_frames
+          - flac_stream_info
+          - flac_recovery
+          - writers
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -49,22 +68,119 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      # The IETF FLAC test files, CC0-1.0, fetched rather than carried: 310 MB
+      # is not weight this repository takes on for inputs that are reproducible
+      # from a URL.
+      #
+      # Only the two targets whose input is a whole FLAC file get them,
+      # because a whole file is the shape those files are. The bare-frame,
+      # streaminfo-plus-frames and selector-prefixed targets take a shape a
+      # whole file is not, and carry theirs in fuzz/seeds/ and
+      # fuzz/corpus-min/.
+      #
+      # Best effort: a failed fetch does not fail the run, because the
+      # committed seeds are the floor. The entry count logged by the next step
+      # is what says whether this one contributed, so a silent shortfall is
+      # not possible.
+      - name: Fetch the IETF FLAC test files
+        if: matrix.fuzz_target == 'probe_whole_file' || matrix.fuzz_target == 'flac_whole_file'
+        run: |
+          git clone --depth 1 https://github.com/ietf-wg-cellar/flac-test-files.git /tmp/flac-test-files || true
+          mkdir -p /tmp/ietf-corpus
+          find /tmp/flac-test-files -name '*.flac' -exec cp {} /tmp/ietf-corpus/ \; 2>/dev/null || true
+          echo "IETF files fetched: $(find /tmp/ietf-corpus -type f | wc -l)"
+
       # Building and running are separate steps because they answer separate
       # questions. A target that builds can still link a sanitizer runtime
       # that never fires, and a fuzzer with a dead sanitizer looks exactly
       # like one that found nothing.
+      #
+      # --target x86_64-unknown-linux-gnu is on every cargo-fuzz command here
+      # and is not optional: cargo-fuzz is installed as a musl binary and
+      # otherwise defaults to its own build triple, which AddressSanitizer
+      # cannot link against.
       - name: Build the target
-        run: cargo +nightly-2026-07-01 fuzz build --target x86_64-unknown-linux-gnu flac_recovery
-
-      # -max_len=4096 is measured rather than conventional: at 4096 this
-      # target reached 961 edges at 304 executions per second against 952 at
-      # 201 for the same run uncapped, so the cap costs no coverage and buys
-      # half as much again in rate.
-      - name: Run for 60 seconds
         run: |
-          cargo +nightly-2026-07-01 fuzz run --target x86_64-unknown-linux-gnu flac_recovery -- \
-            -max_len=4096 -max_total_time=60 -print_final_stats=1 \
-            -rss_limit_mb=2048 -timeout=25
+          cargo +nightly-2026-07-01 fuzz build \
+            --target x86_64-unknown-linux-gnu ${{ matrix.fuzz_target }}
+
+      # The committed seeds are what a cold run starts from; the committed
+      # minimised corpus, where there is one, is the floor under that. No
+      # cache is consulted: GitHub evicts a cache not read for seven days and
+      # a weekly schedule reads it every seven days, so a cache here would
+      # fail silently at the boundary.
+      - name: Assemble the corpus
+        run: |
+          target=${{ matrix.fuzz_target }}
+          mkdir -p "fuzz/corpus/$target"
+          cp "fuzz/seeds/$target"/* "fuzz/corpus/$target"/
+          if [ -d "fuzz/corpus-min/$target" ]; then
+            cp "fuzz/corpus-min/$target"/* "fuzz/corpus/$target"/
+          fi
+          entries=$(find "fuzz/corpus/$target" -type f | wc -l)
+          echo "corpus entries at start: $entries"
+          echo "- \`$target\` started from $entries corpus entries" >> "$GITHUB_STEP_SUMMARY"
+
+      # -max_len=4096 is measured rather than conventional: at 4096 the
+      # FlacRecovery target reached 961 edges at 304 executions per second
+      # against 952 at 201 for the same run uncapped, and FlacFrameReader 969
+      # at 178 against 965 at 22. The cap costs no coverage and buys rate.
+      #
+      # 300 seconds because this is regression detection rather than
+      # exploration: the corpus below is already minimised over a campaign,
+      # and new_units_added is logged so a run that buys nothing says so.
+      # Inputs longer than -max_len are truncated to it when read, which is
+      # what the IETF files above become.
+      - name: Run for 300 seconds
+        shell: bash
+        run: |
+          target=${{ matrix.fuzz_target }}
+          extra=""
+          if [ -d /tmp/ietf-corpus ]; then
+            extra=/tmp/ietf-corpus
+          fi
+          cargo +nightly-2026-07-01 fuzz run \
+            --target x86_64-unknown-linux-gnu "$target" \
+            "fuzz/corpus/$target" $extra -- \
+            -max_len=4096 -max_total_time=300 -print_final_stats=1 \
+            -rss_limit_mb=2048 -timeout=25 2>&1 | tee fuzz-run.log
+
+      # What 300 seconds actually bought. A run starting from twelve entries
+      # and one starting from four thousand look identical in a green tick.
+      - name: Report what the run added
+        if: success()
+        run: |
+          target=${{ matrix.fuzz_target }}
+          added=$(grep -m1 'stat::new_units_added:' fuzz-run.log | tr -s ' ' | cut -d' ' -f2)
+          final=$(find "fuzz/corpus/$target" -type f | wc -l)
+          echo "new_units_added: ${added:-unreported}, corpus entries now: $final"
+          echo "- \`$target\` added ${added:-unreported} units, corpus now $final" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # A slow unit reported during a run is not evidence on its own. Both
+      # slow executions in this crate's pre-publish campaign were CPU
+      # contention artifacts and one replayed at 4.2 microseconds alone, and a
+      # hosted runner is noisier than the machine that measured. So every
+      # reported slow unit is re-run by itself here, and libFuzzer's own
+      # "Executed ... in N ms" line for that run is the measurement.
+      - name: Replay any slow unit in isolation
+        if: success()
+        shell: bash
+        run: |
+          target=${{ matrix.fuzz_target }}
+          shopt -s nullglob
+          units=("fuzz/artifacts/$target"/slow-unit-*)
+          if [ ${#units[@]} -eq 0 ]; then
+            echo "no slow unit was reported"
+            exit 0
+          fi
+          grep -m1 'Slowest unit:' fuzz-run.log || true
+          for unit in "${units[@]}"; do
+            echo "== replaying $unit on its own =="
+            cargo +nightly-2026-07-01 fuzz run \
+              --target x86_64-unknown-linux-gnu "$target" "$unit" -- \
+              -rss_limit_mb=2048 -timeout=25
+          done
 
       # The input that caused a finding, not just the line saying there was
       # one. Without it a crash is a red cross and a log.
@@ -72,6 +188,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.fuzz_target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
