@@ -1,1 +1,6 @@
 * text=auto eol=lf
+
+# Fuzz inputs are bytes, not text. `text=auto` guesses from content, and a
+# guess that lands on "text" rewrites line endings and corrupts the input.
+fuzz/seeds/** binary
+fuzz/corpus-min/** binary

@@ -55,7 +55,11 @@ Malformed input returns a typed error naming what was rejected. Panics, hangs an
 
 ### Fuzzing
 
-The parsers are fuzzed with both coverage-guided and seeded deterministic campaigns, under overflow checks and debug assertions. Before the first release the crate reached over 700 million executions across seven targets with no panics. Every crash ever found is kept as a committed regression test carrying the literal bytes, so it can never recur unnoticed.
+Nine coverage-guided fuzz targets are committed under `fuzz/`. They cover whole-file and streaming identification, the WAV and AIFF streaming decoders, the FLAC whole-file, bare-frame, out-of-band streaminfo and recovery readers, and the three writers. They build with `cargo fuzz` and run on a weekly schedule against the repository's default branch, under a release profile with overflow checks and debug assertions on. Each starts from seeds committed beside it, and the two FLAC targets that carry one start from a committed minimised corpus as well.
+
+`tests/fuzz_seeded.rs` is the gate that runs on every pull request. It derives its inputs from fixed seeds under a fixed mutation schedule, so it replays byte for byte on every machine, and it drives the two headerless decoders as well as the parsers.
+
+Any crash a scheduled run finds is reduced and committed into `tests/fuzz_seeded.rs` as the literal bytes that caused it, so the regression outlives the run that found it.
 
 Exhaustive prefix and single-byte-mutation sweeps run over the container formats as ordinary tests.
 
