@@ -58,13 +58,13 @@
 
 use std::fmt;
 
-use crate::aiff::{AiffReader, AiffStreamDecoder};
+use crate::aiff::{AiffFormat, AiffReader, AiffStreamDecoder};
 use crate::audio::{AudioBuffer, AudioSpec};
 use crate::codec::FourCc;
 use crate::error::DecodeError;
-use crate::flac::{FlacReader, FlacStreamDecoder};
+use crate::flac::{FlacReader, FlacStreamDecoder, FlacStreamInfo, Md5Check};
 use crate::source::StreamSource;
-use crate::wav::{WavReader, WavStreamDecoder};
+use crate::wav::{WavFormat, WavReader, WavStreamDecoder};
 use crate::{aiff, riff};
 
 /// The four bytes every FLAC stream starts with.
@@ -373,6 +373,72 @@ impl AudioStreamDecoder {
     /// `None` before [`Container::PROBE_BYTES`] bytes have been pushed.
     pub const fn container(&self) -> Option<Container> {
         self.container
+    }
+
+    /// What the WAV `fmt ` chunk declared, once it has arrived.
+    ///
+    /// This is [`WavStreamDecoder::format`] on the reader the probe chose, so
+    /// a caller reaching the front door gets the same detail as one that
+    /// picked the reader by hand.
+    ///
+    /// `None` in three cases: before the stream has been identified at all,
+    /// for a stream identified as any container other than
+    /// [`Container::Wav`], and for a WAV whose `fmt ` chunk has not yet
+    /// arrived. Identification is not the header: knowing a stream is a WAV
+    /// happens twelve bytes in and the `fmt ` chunk is later.
+    pub const fn wav_format(&self) -> Option<WavFormat> {
+        match &self.inner {
+            Some(Inner::Wav(reader)) => reader.format(),
+            _ => None,
+        }
+    }
+
+    /// What the AIFF `COMM` chunk declared, once it has arrived.
+    ///
+    /// This is [`AiffStreamDecoder::format`] on the reader the probe chose.
+    ///
+    /// `None` before the stream has been identified, for a stream identified
+    /// as any container other than [`Container::Aiff`], and for an AIFF whose
+    /// `COMM` chunk has not yet arrived.
+    pub const fn aiff_format(&self) -> Option<AiffFormat> {
+        match &self.inner {
+            Some(Inner::Aiff(reader)) => reader.format(),
+            _ => None,
+        }
+    }
+
+    /// What the FLAC streaminfo metadata block declared, once it has arrived.
+    ///
+    /// This is [`FlacStreamDecoder::stream_info`] on the reader the probe
+    /// chose.
+    ///
+    /// `None` before the stream has been identified, for a stream identified
+    /// as any container other than [`Container::Flac`], and for a FLAC stream
+    /// whose streaminfo block has not yet arrived. The probe never reaches a
+    /// bare frame stream, so the value here is always a block read from the
+    /// stream rather than one derived from a first frame or supplied by a
+    /// caller.
+    pub fn flac_stream_info(&self) -> Option<FlacStreamInfo> {
+        match &self.inner {
+            Some(Inner::Flac(reader)) => reader.stream_info(),
+            _ => None,
+        }
+    }
+
+    /// What the end of a FLAC stream did about the streaminfo MD5.
+    ///
+    /// This is [`FlacStreamDecoder::md5_check`] on the reader the probe chose.
+    ///
+    /// `None` before the stream has been identified, for a stream identified
+    /// as any container other than [`Container::Flac`], and for a FLAC stream
+    /// on which [`finish`](StreamSource::finish) has not run. `None` is not a
+    /// verdict: the check happens at the end of the stream, and a decode that
+    /// has not finished has nothing to report.
+    pub fn flac_md5_check(&self) -> Option<Md5Check> {
+        match &self.inner {
+            Some(Inner::Flac(reader)) => reader.md5_check(),
+            _ => None,
+        }
     }
 
     /// Offers the held leading bytes to the inner reader, front first.

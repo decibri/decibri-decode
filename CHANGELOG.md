@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-08-06
+
+### Added
+
+- Four accessors on `AudioStreamDecoder` reaching the detail of the reader the
+  probe chose: `wav_format` returning `Option<WavFormat>`, `aiff_format`
+  returning `Option<AiffFormat>`, `flac_stream_info` returning
+  `Option<FlacStreamInfo>` and `flac_md5_check` returning `Option<Md5Check>`.
+  Each is the same value the corresponding per-format streaming reader
+  reports: `WavStreamDecoder::format`, `AiffStreamDecoder::format`,
+  `FlacStreamDecoder::stream_info` and `FlacStreamDecoder::md5_check`. Each
+  returns `None` before the stream has been identified, `None` for a stream
+  identified as a container the accessor is not about, and `None` after
+  identification until the header chunk carrying the detail has arrived;
+  `flac_md5_check` returns `None` until `finish` has run.
+
+### Changed
+
+- The crate-level guarantee no longer states a sample count for "decoding with
+  rate conversion". Decoding a source of `n` frames yields exactly
+  `n * channels` samples, and the count under a later resample is stated as
+  `decibri-resampler`'s rather than this crate's.
+
 ## [0.1.3] - 2026-08-06
 
 Documentation only. No behaviour change from 0.1.2.

@@ -15,14 +15,39 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A tag of crate-v0.2.0 against a manifest still saying 0.1.4 either
+      # publishes a version nobody asked for or fails somewhere inside cargo
+      # with a message about the registry. Checked here, before
+      # authentication, so a mismatch never reaches crates.io and the job
+      # fails saying which two values disagreed.
+      #
+      # Guarded on the tag prefix because workflow_dispatch runs this workflow
+      # from a branch ref, which has no version in it to compare.
+      - name: Check the tag matches the manifest version
+        if: startsWith(github.ref, 'refs/tags/crate-v')
+        run: |
+          tag_version="${GITHUB_REF#refs/tags/crate-v}"
+          manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "tag says $tag_version, Cargo.toml says $manifest_version"
+          if [ -z "$manifest_version" ]; then
+            echo "::error::no version found in Cargo.toml"
+            exit 1
+          fi
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "::error::tag crate-v$tag_version does not match the Cargo.toml version $manifest_version"
+            exit 1
+          fi
+
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
       - name: Confirm authentication
         run: echo "Trusted publishing authentication succeeded."
 
+      # --locked so the release is built from the committed lock file rather
+      # than from whatever resolves at publish time.
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/crate-v')
-        run: cargo publish
+        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
