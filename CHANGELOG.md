@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-08-07
+
+### Changed
+
+- `AiffWriter::write` and `AiffWriter::to_bytes` refuse a channel count above
+  32,767 with `DecodeError::UnsupportedChannelLayout` naming the count.
+  `COMM`'s `numChannels` is a signed 16-bit integer, so a larger count is a
+  negative number to a reader that reads the field as the specification
+  defines it. 32,767 is written and read back unchanged. `AiffReader` and
+  `AiffStreamDecoder` are unchanged: they read the field unsigned and accept
+  every count up to 65,535.
+
+### Added
+
+- The WAV and AIFF dimension matrices cross nine channels as well as one, two
+  and six. The WAV matrix is 5,376 files and the AIFF matrix 7,168.
+- A nine-channel WAV and a nine-channel AIFF written by ffmpeg 8.1.2, carried
+  byte for byte and decoded through the whole-file and streaming paths at six
+  feed sizes, against the samples ffmpeg's own decoder reports for the same
+  bytes.
+- `tests/flac_conformance.rs` states FLAC's boundary: eight independent
+  channels decode, and the frame header's reserved channel assignments 11
+  through 15, which are the only values past the ten the format defines,
+  are `DecodeError::Malformed` on both paths.
+- `tests/allocation_ceiling.rs` measures a declared channel count. A WAV
+  declaring 65,535 channels of 16-bit over 2,000 bytes is
+  `DecodeError::Truncated { expected: 131070, available: 2000 }`, and an AIFF
+  declaring 65,535 channels and 4,294,967,295 frames is
+  `DecodeError::Truncated { expected: 562941363355650, available: 2000 }`.
+  Both report the same pair on the streaming path. Measured cumulatively:
+  0 bytes allocated on the whole-file path and 24 bytes on the streaming
+  path, for both containers.
+
 ## [0.1.4] - 2026-08-06
 
 ### Added

@@ -112,11 +112,18 @@ fn chunk(id: &[u8; 4], declared: u32, body: &[u8]) -> Vec<u8> {
 
 fn fmt_body(channels: u16, rate: u32, bits: u16) -> Vec<u8> {
     let block_align = channels * bits / 8;
+    fmt_body_declaring(channels, rate, bits, block_align)
+}
+
+/// The same body with `nBlockAlign` stated rather than computed, for the
+/// channel counts whose frame is wider than the `u16` that field is. One
+/// implementation of the layout, so a break in it shows up in both callers.
+fn fmt_body_declaring(channels: u16, rate: u32, bits: u16, block_align: u16) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&1u16.to_le_bytes());
     body.extend_from_slice(&channels.to_le_bytes());
     body.extend_from_slice(&rate.to_le_bytes());
-    body.extend_from_slice(&(rate * u32::from(block_align)).to_le_bytes());
+    body.extend_from_slice(&rate.wrapping_mul(u32::from(block_align)).to_le_bytes());
     body.extend_from_slice(&block_align.to_le_bytes());
     body.extend_from_slice(&bits.to_le_bytes());
     body
@@ -188,6 +195,28 @@ fn an_oversized_fmt_chunk() -> Vec<u8> {
         &[
             chunk(b"fmt ", 60_000, &fmt_body(2, 48_000, 16)),
             chunk(b"data", 8, &[0x5A; 8]),
+        ],
+    )
+}
+
+/// A `fmt ` declaring every channel `nChannels` can hold, over two kilobytes
+/// of `data`.
+///
+/// The declared count is not a length, so nothing in the reader is entitled
+/// to reserve for it, but one frame of 65,535 16-bit channels is 131,070
+/// bytes and the file carries 2,000. `nBlockAlign` is written as the wrapped
+/// value the field can hold, because a real file could carry no other: the
+/// reader treats the field as advisory and works from `nChannels`.
+fn every_channel_a_wav_can_declare() -> Vec<u8> {
+    file(
+        b"RIFF",
+        &[
+            chunk(
+                b"fmt ",
+                16,
+                &fmt_body_declaring(u16::MAX, 48_000, 16, 0xFFFE),
+            ),
+            chunk(b"data", 2_000, &vec![0x5A; 2_000]),
         ],
     )
 }
@@ -276,6 +305,22 @@ fn an_oversized_comm_chunk() -> Vec<u8> {
     aiff_file(&[
         be_chunk(b"COMM", 60_000, &comm_body(2, 2, 16)),
         be_chunk(b"SSND", 16, &ssnd),
+    ])
+}
+
+/// A `COMM` declaring every channel `numChannels` can hold, and every frame
+/// `numSampleFrames` can hold, over two kilobytes of `SSND`.
+///
+/// The product is 65,535 channels times 4,294,967,295 frames times two bytes,
+/// or 562,941,363,355,650 bytes, which is 512 tebibytes and cannot be
+/// reserved on any machine. The reader is expected to report it and reserve
+/// none of it.
+fn every_channel_an_aiff_can_declare() -> Vec<u8> {
+    let mut ssnd = vec![0u8; 8]; // offset, blockSize
+    ssnd.extend_from_slice(&[0x5A; 2_000]);
+    aiff_file(&[
+        be_chunk(b"COMM", 18, &comm_body(u16::MAX, u32::MAX, 16)),
+        be_chunk(b"SSND", 2_008, &ssnd),
     ])
 }
 
@@ -812,6 +857,110 @@ fn no_declared_size_reaches_the_allocator() {
              sync points, which is per-candidate rather than per-scan"
         );
     }
+
+    // -- A declared channel count, which is not a length -----------------
+    //
+    // Every case above declares a *size* and is refused for over-declaring
+    // it. A channel count is a different shape: it is a small number in a
+    // small field that multiplies into a large one, so a reader that reserved
+    // a frame, or a payload, from the header rather than from the bytes that
+    // arrived would allocate for the product without ever reading a size it
+    // could be accused of trusting.
+    //
+    // Neither reader does, and until now nothing measured it. Both counts
+    // below are the largest their field can hold, so no file can ask for
+    // more.
+    //
+    // Cumulative rather than peak, for the reason the recovery scan above
+    // records: a high-water mark cannot see a path that allocates and frees
+    // per frame, and per-frame is exactly how a channel count would get its
+    // multiplier.
+
+    // WAV: 65,535 channels of 16-bit is a 131,070-byte frame, over a file
+    // carrying 2,000 bytes of payload.
+    let bytes = every_channel_a_wav_can_declare();
+    let (result, total) = total_bytes(|| WavReader::new(&bytes).err());
+    assert!(
+        matches!(
+            result,
+            Some(DecodeError::Truncated {
+                expected: 131_070,
+                available: 2_000
+            })
+        ),
+        "a 65,535-channel WAV must name both lengths, not {result:?}"
+    );
+    println!(
+        "{total:>8} bytes TOTAL :: WAV declaring 65,535 channels over 2,000 bytes \
+         (cumulative, not peak)"
+    );
+    assert!(
+        total <= CEILING,
+        "a declared channel count reached the allocator: {total} bytes for a frame of 131,070"
+    );
+
+    let (streamed, total) = total_bytes(|| stream_all(&bytes, 64).err());
+    assert!(
+        matches!(
+            streamed,
+            Some(DecodeError::Truncated {
+                expected: 131_070,
+                available: 2_000
+            })
+        ),
+        "the stream accepted 65,535 channels over 2,000 bytes: {streamed:?}"
+    );
+    println!(
+        "{total:>8} bytes TOTAL :: the same file, streamed in 64-byte pieces \
+         (cumulative, not peak)"
+    );
+    assert!(
+        total <= CEILING,
+        "the streaming reader allocated {total} bytes on a declared channel count"
+    );
+
+    // AIFF: 65,535 channels times 4,294,967,295 frames times two bytes is
+    // 562,941,363,355,650, which the reader reports and does not reserve.
+    let bytes = every_channel_an_aiff_can_declare();
+    let (result, total) = total_bytes(|| AiffReader::new(&bytes).err());
+    assert!(
+        matches!(
+            result,
+            Some(DecodeError::Truncated {
+                expected: 562_941_363_355_650,
+                available: 2_000
+            })
+        ),
+        "a 65,535-channel AIFF must name both lengths, not {result:?}"
+    );
+    println!(
+        "{total:>8} bytes TOTAL :: AIFF declaring 65,535 channels and 4,294,967,295 frames \
+         over 2,000 bytes (cumulative, not peak)"
+    );
+    assert!(
+        total <= CEILING,
+        "a declared channel count reached the allocator: {total} bytes for 512 TiB declared"
+    );
+
+    let (streamed, total) = total_bytes(|| aiff_stream_all(&bytes, 64).err());
+    assert!(
+        matches!(
+            streamed,
+            Some(DecodeError::Truncated {
+                expected: 562_941_363_355_650,
+                available: 2_000
+            })
+        ),
+        "the AIFF stream accepted 65,535 channels over 2,000 bytes: {streamed:?}"
+    );
+    println!(
+        "{total:>8} bytes TOTAL :: the same file, streamed in 64-byte pieces \
+         (cumulative, not peak)"
+    );
+    assert!(
+        total <= CEILING,
+        "the AIFF streaming reader allocated {total} bytes on a declared channel count"
+    );
 
     for (case, peak) in report {
         println!("{peak:>8} bytes peak :: {case}");

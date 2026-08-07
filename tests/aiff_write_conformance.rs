@@ -720,6 +720,46 @@ fn the_writer_refuses_a_partial_trailing_frame_in_every_encoding() {
     }
 }
 
+/// `numChannels` is a signed 16-bit integer, so 32,767 is the largest count
+/// a `COMM` chunk can state. The writer stops there.
+///
+/// The boundary file is written and read back, so the limit is where the
+/// field ends and not one short of it, and the counts past it are refused
+/// naming the count that was asked for.
+///
+/// The reader is not limited to match. It reads the field unsigned and
+/// accepts any count it finds, which is what the nine-channel cases in
+/// `aiff_conformance.rs` and the 65,535-channel case in
+/// `allocation_ceiling.rs` exercise.
+#[test]
+fn the_writer_stops_where_num_channels_stops() {
+    const WIDEST: u16 = 32_767;
+
+    let widest = AiffWriter::new(AudioSpec::new(8_000, WIDEST), AiffCodec::PcmI8);
+    let bytes = widest
+        .to_bytes(&vec![0.25f32; usize::from(WIDEST)])
+        .expect("32,767 channels is inside the field");
+    let reader = AiffReader::new(&bytes).expect("read the boundary file back");
+    assert_eq!(reader.spec().channels, WIDEST, "one interchannel frame");
+    assert_eq!(reader.frames(), 1);
+    assert_eq!(reader.decode_to_end().samples().len(), usize::from(WIDEST));
+
+    for channels in [WIDEST + 1, 40_000, u16::MAX] {
+        let writer = AiffWriter::new(AudioSpec::new(8_000, channels), AiffCodec::PcmI8);
+        let error = writer
+            .to_bytes(&vec![0.25f32; usize::from(channels)])
+            .expect_err("a count numChannels cannot state must be refused");
+        assert!(
+            matches!(
+                error,
+                DecodeError::UnsupportedChannelLayout { channels: found }
+                    if found == channels
+            ),
+            "{channels} channels: unexpected error: {error}"
+        );
+    }
+}
+
 // -- Gate 14: cross-platform determinism of the written bytes -----------------
 
 /// FNV-1a, so the witness is the bytes themselves and not a float

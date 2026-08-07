@@ -147,6 +147,14 @@ const ALAW: [FourCc; 2] = [FourCc(*b"alaw"), FourCc(*b"ALAW")];
 /// The two spellings of G.711 mu-law.
 const ULAW: [FourCc; 2] = [FourCc(*b"ulaw"), FourCc(*b"ULAW")];
 
+/// The largest channel count `COMM`'s `numChannels` can state.
+///
+/// The field is a signed 16-bit integer, so 32,768 and above are negative
+/// numbers when read as the specification defines them. This crate's reader
+/// reads the field unsigned and accepts what it finds; the writer will not
+/// produce one.
+const MAX_WRITABLE_CHANNELS: u16 = i16::MAX as u16;
+
 /// The `COMM` body a plain AIFF file carries: channels, frames, width, rate.
 const COMM_BYTES_AIFF: u64 = 18;
 
@@ -1590,7 +1598,12 @@ impl AiffWriter {
     ///
     /// # Errors
     ///
-    /// - [`DecodeError::UnsupportedChannelLayout`] for no channels.
+    /// - [`DecodeError::UnsupportedChannelLayout`] for no channels, and for
+    ///   more than the 32,767 `numChannels` can state. That field is a signed
+    ///   16-bit integer, so a larger count is a negative number to every
+    ///   reader that reads it as the specification defines it. This crate's
+    ///   own reader reads it unsigned and accepts such a file if one turns up;
+    ///   the writer will not produce one.
     /// - [`DecodeError::Malformed`] for a zero sample rate, and for audio
     ///   whose file would exceed AIFF's 32-bit size fields. The `FORM` size
     ///   is checked in 64-bit arithmetic and a file that would wrap it is
@@ -1604,7 +1617,7 @@ impl AiffWriter {
     ///   frame would produce a file this crate's own readers reject.
     pub fn write(&self, samples: &[f32], output: &mut Vec<u8>) -> Result<usize, DecodeError> {
         let channels = usize::from(self.spec.channels);
-        if channels == 0 {
+        if channels == 0 || self.spec.channels > MAX_WRITABLE_CHANNELS {
             return Err(DecodeError::UnsupportedChannelLayout {
                 channels: self.spec.channels,
             });
@@ -2230,6 +2243,26 @@ mod tests {
             no_channels.to_bytes(&[]),
             Err(DecodeError::UnsupportedChannelLayout { channels: 0 })
         ));
+
+        // `numChannels` is a signed 16-bit integer, so 32,767 is the largest
+        // count it states as itself. 32,768 is the first that would be read
+        // back negative.
+        let widest = AiffWriter::new(AudioSpec::new(48_000, 32_767), AiffCodec::PcmI8);
+        assert!(widest.to_bytes(&vec![0.0; 32_767]).is_ok());
+        for channels in [32_768u16, 40_000, u16::MAX] {
+            let too_wide = AiffWriter::new(AudioSpec::new(48_000, channels), AiffCodec::PcmI8);
+            let error = too_wide
+                .to_bytes(&vec![0.0; usize::from(channels)])
+                .expect_err("a count numChannels cannot state must be refused");
+            assert!(
+                matches!(
+                    error,
+                    DecodeError::UnsupportedChannelLayout { channels: found }
+                        if found == channels
+                ),
+                "unexpected error for {channels} channels: {error}"
+            );
+        }
 
         // A zero rate is refused before the encoder that cannot spell it,
         // and the offset names the rate field of the form being written:
