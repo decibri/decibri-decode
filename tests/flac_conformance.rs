@@ -1084,6 +1084,104 @@ fn a_frame_past_the_streaminfo_maximum_block_size_is_rejected() {
     );
 }
 
+/// Eight channels decode, and nine cannot be asked for.
+///
+/// FLAC's frame header names its channels in four bits: 0 through 7 are one
+/// through eight independent channels, 8 through 10 are the stereo
+/// decorrelations, and 11 through 15 are reserved. Streaminfo's field is three
+/// bits and so tops out at eight for the same reason. A ninth channel
+/// therefore has no encoding, and the only way to ask for one is a reserved
+/// value, which is refused.
+///
+/// Written by hand rather than generated, because no encoder produces a
+/// nine-channel FLAC stream: ffmpeg refuses the channel count outright.
+///
+/// The WAV and AIFF matrices next door now carry nine channels, so this states
+/// the boundary between the two rather than leaving it to be inferred from
+/// where the counts stop. The writer's half of it is
+/// `nine_channels_is_refused` in `flac_write_conformance.rs`.
+#[test]
+fn eight_channels_decode_and_the_reserved_assignments_past_them_are_refused() {
+    // One whole block, so the builder can use the common block size code and
+    // the frame header stays at its shortest.
+    const BLOCK: usize = 256;
+    let build = Build {
+        block_size: BLOCK as u32,
+        assignment: 7, // eight independent channels, the format's most
+        size_code: SizeCode::Common(8),
+        rate_code: RateCode::Common(9),
+        ..Build::default()
+    };
+    let samples: Vec<Vec<i64>> = (0..8)
+        .map(|channel| audio(BLOCK, 16, 0, 0x9C00 + channel as u64))
+        .collect();
+    let file = flac_file(&build, &samples);
+
+    let decoded = FlacReader::new(&file)
+        .expect("open")
+        .decode_to_end()
+        .expect("eight channels is inside the format");
+    assert_eq!(decoded.spec().channels, 8, "eight channels must decode");
+    assert_eq!(decoded.frames(), BLOCK);
+    assert_eq!(decoded.samples().len(), 8 * BLOCK, "eight channels of 256");
+
+    // The frame sits after `fLaC` and one 34-byte streaminfo block with its
+    // four-byte header, and both codes above are common ones, so the header is
+    // its shortest six bytes: two of sync, one of sizes, one of channels and
+    // depth, one coded number and the CRC-8. Each of those is asserted rather
+    // than assumed, so a builder change turns this into a failed assertion
+    // rather than a patch of the wrong byte.
+    const FRAME: usize = 4 + 4 + 34;
+    assert_eq!(file[FRAME], 0xFF, "the frame sync");
+    assert_eq!(
+        file[FRAME + 1],
+        0xF8,
+        "the sync tail and a fixed block size"
+    );
+    assert_eq!(file[FRAME + 3] >> 4, 7, "eight independent channels");
+    assert_eq!(
+        file[FRAME + 5],
+        reference_crc8(&file[FRAME..FRAME + 5]),
+        "the six-byte header ends in its CRC-8"
+    );
+
+    // Every value past the ten the format defines, each with a corrected
+    // CRC-8 so the header itself is accepted and the assignment is what the
+    // rejection is about.
+    for reserved in 11u8..=15 {
+        let mut broken = file.clone();
+        broken[FRAME + 3] = (reserved << 4) | (broken[FRAME + 3] & 0x0F);
+        broken[FRAME + 5] = reference_crc8(&broken[FRAME..FRAME + 5]);
+        let error = FlacReader::new(&broken)
+            .and_then(|reader| reader.decode_to_end())
+            .expect_err("a reserved channel assignment must be refused");
+        assert!(
+            matches!(
+                error,
+                DecodeError::Malformed {
+                    expected: "a defined channel assignment",
+                    ..
+                }
+            ),
+            "assignment {reserved}: unexpected error: {error}"
+        );
+
+        // And on the streaming path, which parses its own frame headers.
+        let streamed = stream_decode(&broken, 3)
+            .expect_err("the stream must refuse it too, at every feed size");
+        assert!(
+            matches!(
+                streamed,
+                DecodeError::Malformed {
+                    expected: "a defined channel assignment",
+                    ..
+                }
+            ),
+            "assignment {reserved} streamed: unexpected error: {streamed}"
+        );
+    }
+}
+
 /// A stream that carries fewer or more samples than it declared is a typed
 /// error in both directions, never a quietly short or long buffer.
 #[test]
